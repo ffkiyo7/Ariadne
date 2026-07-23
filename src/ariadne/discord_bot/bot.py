@@ -1096,6 +1096,20 @@ if commands is not None:
             self._synced = True
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
 
+        async def on_ready(self) -> None:
+            """Redraw persisted cards after a gateway reconnect or service restart."""
+
+            for session in await asyncio.to_thread(self.service.state.list_sessions):
+                if not session.discord_thread_id or not session.status_message_id:
+                    continue
+                try:
+                    thread = self.get_channel(int(session.discord_thread_id))
+                    if thread is None:
+                        thread = await self.fetch_channel(int(session.discord_thread_id))
+                    await self._refresh_status(thread, session.id, force=True)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException, StateError, ValueError):
+                    continue
+
         async def _scheduler_loop(self) -> None:
             while not self.is_closed():
                 try:

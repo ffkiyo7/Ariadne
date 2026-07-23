@@ -64,6 +64,8 @@ The status card exposes only the action valid for the persisted state:
 approve/retry TASK, retry a failed review, request review, confirm review, create Draft PR, check CI,
 or submit a preview URL.  This does not replace owner judgment: the owner reads
 the review transcript and explicitly confirms it before a branch is pushed.
+The bot redraws persisted cards after every gateway reconnect, so a restart
+cannot leave the owner with a stale action surface.
 
 ## Data ownership
 
