@@ -446,9 +446,16 @@ class DiscordHarnessService:
         session = self.state.get_session(session_id)
         pipeline = self.state.get_pipeline_run(session_id)
         turns = self.state.list_turns(session_id)
+        latest_turn = turns[-1] if turns else None
         task_turn = next((turn for turn in reversed(turns) if turn.id == pipeline.task_turn_id), None)
+        retrying_failed_review = bool(
+            session.status is SessionStatus.NEEDS_OWNER
+            and latest_turn is not None
+            and latest_turn.execution_kind is TurnKind.REVIEW
+            and latest_turn.state in {TurnState.FAILED, TurnState.INTERRUPTED, TurnState.CANCELLED}
+        )
         if (
-            session.status is not SessionStatus.REVIEW_PENDING
+            (session.status is not SessionStatus.REVIEW_PENDING and not retrying_failed_review)
             or task_turn is None
             or task_turn.execution_kind is not TurnKind.HERMES
             or task_turn.state is not TurnState.SUCCEEDED
@@ -456,7 +463,8 @@ class DiscordHarnessService:
         ):
             raise GateError("a successfully verified Hermes TASK is required before requesting review")
         provider = self._active_provider(session_id)
-        request_path = self.layout.session_dir(session_id) / f"review-request-{task_turn.id}.md"
+        review_attempt = 1 + sum(1 for turn in turns if turn.execution_kind is TurnKind.REVIEW)
+        request_path = self.layout.session_dir(session_id) / f"review-request-{task_turn.id}-{review_attempt}.md"
         ensure_private_file(request_path)
         request_path.write_text(
             "# Ariadne review request\n\n"
@@ -471,7 +479,7 @@ class DiscordHarnessService:
         request_path.chmod(0o600)
         turn = self.state.create_turn(
             provider_session_id=provider.id,
-            owner_message_id=f"review:{task_turn.id}",
+            owner_message_id=f"review:{task_turn.id}:{review_attempt}",
             requested_model=provider.default_model,
             configured_model=provider.default_model,
             requested_effort=provider.default_effort,
@@ -480,9 +488,11 @@ class DiscordHarnessService:
             execution_kind=TurnKind.REVIEW,
         )
         self.state.enqueue_turn(turn.id)
+        if retrying_failed_review:
+            self.state.transition_session(session_id, SessionStatus.REVIEW_PENDING)
         self.state.record_audit(
             actor=str(self.config.owner_user_id or "owner"),
-            action="strong-model-review-queued",
+            action="strong-model-review-retried" if retrying_failed_review else "strong-model-review-queued",
             harness_session_id=session_id,
             turn_id=turn.id,
             details_json=json.dumps({"task_turn_id": task_turn.id}, ensure_ascii=False),
@@ -858,9 +868,9 @@ if commands is not None:
 
 
     class RequestReviewButton(discord.ui.Button):
-        def __init__(self, *, session_id: str):
+        def __init__(self, *, session_id: str, retry: bool = False):
             super().__init__(
-                label="请求强模型 Review",
+                label="重新请求强模型 Review" if retry else "请求强模型 Review",
                 style=discord.ButtonStyle.primary,
                 custom_id=f"pipeline:{session_id}:review-request",
             )
@@ -991,7 +1001,14 @@ if commands is not None:
             if session.status is SessionStatus.PLAN_APPROVED:
                 self.add_item(TaskApprovalButton(session_id=session_id, retry=False))
             elif session.status is SessionStatus.NEEDS_OWNER:
-                self.add_item(TaskApprovalButton(session_id=session_id, retry=True))
+                if (
+                    latest
+                    and latest.execution_kind is TurnKind.REVIEW
+                    and latest.state in {TurnState.FAILED, TurnState.INTERRUPTED, TurnState.CANCELLED}
+                ):
+                    self.add_item(RequestReviewButton(session_id=session_id, retry=True))
+                else:
+                    self.add_item(TaskApprovalButton(session_id=session_id, retry=True))
             elif session.status is SessionStatus.REVIEW_PENDING:
                 if latest and latest.execution_kind is TurnKind.HERMES and latest.state is TurnState.SUCCEEDED:
                     self.add_item(RequestReviewButton(session_id=session_id))

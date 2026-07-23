@@ -61,7 +61,7 @@ waiting_for_owner
 ```
 
 The status card exposes only the action valid for the persisted state:
-approve/retry TASK, request review, confirm review, create Draft PR, check CI,
+approve/retry TASK, retry a failed review, request review, confirm review, create Draft PR, check CI,
 or submit a preview URL.  This does not replace owner judgment: the owner reads
 the review transcript and explicitly confirms it before a branch is pushed.
 

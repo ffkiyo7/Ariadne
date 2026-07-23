@@ -318,6 +318,62 @@ python3 -c "print('ok')"
         pipeline = self.state.get_pipeline_run(start.session_id)
         self.assertEqual(pipeline.task_turn_id, turn.id)
 
+    def test_failed_review_can_retry_without_reexecuting_hermes(self):
+        start = self.service.start_from_source(
+            source_message_id="source-review-retry",
+            source_content="Start",
+            provider_name="codex",
+        )
+        worktree = self.worktrees.root / start.session_id
+        plan = worktree / "docs" / "plans" / "PLAN-review.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# PLAN\n\nSafe docs-only change.\n", encoding="utf-8")
+        initial = self.state.list_turns(start.session_id)[0]
+        self.state.claim_next()
+        self.state.finalize_turn(initial.id, state=TurnState.SUCCEEDED, exit_code=0)
+        self.service.handle_control(session_id=start.session_id, command=parse_control("!approve PLAN-review"))
+        task = worktree / "docs" / "tasks" / "TASK-review.md"
+        task.parent.mkdir(parents=True)
+        task.write_text(
+            """# Objective
+Update the documentation.
+
+# Allowed files
+- `README.md`
+
+# Forbidden zones
+Do not push or merge.
+
+# Interfaces
+None.
+
+# Definition of done
+The README is updated.
+
+# Verification commands
+```text
+test -f README.md
+```
+""",
+            encoding="utf-8",
+        )
+        self.service.handle_control(session_id=start.session_id, command=parse_control("!task TASK-review"))
+        hermes = self.state.list_turns(start.session_id)[-1]
+        self.state.claim_next()
+        self.state.finalize_turn(hermes.id, state=TurnState.SUCCEEDED, exit_code=0)
+        failed_review = self.service.request_review(session_id=start.session_id)
+        self.state.claim_next()
+        self.state.finalize_turn(failed_review.id, state=TurnState.FAILED, exit_code=2)
+        self.assertEqual(self.state.get_session(start.session_id).status, SessionStatus.NEEDS_OWNER)
+
+        retry = self.service.request_review(session_id=start.session_id)
+        self.assertEqual(retry.execution_kind, TurnKind.REVIEW)
+        self.assertEqual(self.state.get_session(start.session_id).status, SessionStatus.REVIEW_PENDING)
+        self.assertEqual(
+            [turn.execution_kind for turn in self.state.list_turns(start.session_id)].count(TurnKind.HERMES),
+            1,
+        )
+
     def test_owner_message_enqueues_one_turn_after_configuration_is_fixed(self):
         start = self.service.start_from_source(
             source_message_id="source-1",
