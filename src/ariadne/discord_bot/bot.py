@@ -80,7 +80,9 @@ class DiscordHarnessService:
         self.state = state
         self.layout = layout.ensure()
         self.coordinator = coordinator
-        self.redactor = redactor or Redactor({config.discord_token} if config.discord_token else set())
+        self.redactor = redactor or Redactor(
+            {secret for secret in (config.discord_token, config.github_token) if secret}
+        )
         self.worktrees = worktrees or WorktreeManager(
             repo=config.project_repo,
             worktree_root=config.worktree_root,
@@ -516,6 +518,16 @@ class DiscordHarnessService:
             actor=str(self.config.owner_user_id or "owner"),
         )
 
+    def _github_client(self, *, cwd: Path) -> GhClient:
+        """Create a GitHub client whose credential stays out of provider envs."""
+
+        return GhClient(
+            cwd=cwd,
+            base_branch=self.config.profile.base_branch,
+            branch_prefix=self.config.profile.branch_prefix,
+            token=self.config.github_token,
+        )
+
     def open_draft_pr(self, *, session_id: str, title: str, body: str):
         title = title.strip()
         body = body.strip()
@@ -526,11 +538,7 @@ class DiscordHarnessService:
             raise GateError("owner must first confirm a completed strong-model review")
         session = self.state.get_session(session_id)
         head_sha = self.pipeline.push_branch(session_id=session_id)
-        github = GhClient(
-            cwd=session.worktree,
-            base_branch=self.config.profile.base_branch,
-            branch_prefix=self.config.profile.branch_prefix,
-        )
+        github = self._github_client(cwd=session.worktree)
         return self.pipeline.open_draft_pr(
             session_id=session_id,
             github=github,
@@ -541,11 +549,7 @@ class DiscordHarnessService:
 
     def record_ci(self, *, session_id: str):
         session = self.state.get_session(session_id)
-        github = GhClient(
-            cwd=session.worktree,
-            base_branch=self.config.profile.base_branch,
-            branch_prefix=self.config.profile.branch_prefix,
-        )
+        github = self._github_client(cwd=session.worktree)
         return self.pipeline.record_ci(session_id=session_id, github=github)
 
     def record_preview(self, *, session_id: str, url: str) -> None:
@@ -656,11 +660,7 @@ class DiscordHarnessService:
                 owner_id=self.config.owner_user_id or "",
                 pr_number=int(command.args[0]),
                 full_head_sha=command.args[1],
-                github=GhClient(
-                    cwd=session.worktree,
-                    base_branch=self.config.profile.base_branch,
-                    branch_prefix=self.config.profile.branch_prefix,
-                ),
+                github=self._github_client(cwd=session.worktree),
             )
             return f"已用 `{facts.pr.head_sha}` 完成 owner accept 与 match-head-commit merge。"
         if command.name == "resume":

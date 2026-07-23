@@ -110,6 +110,17 @@ test -f README.md
 
 
 class GitHubClientTests(unittest.TestCase):
+    def test_token_is_scoped_to_gh_subprocess(self):
+        token = "github-private-token"
+        completed = subprocess.CompletedProcess(
+            ["gh"], 0, stdout="build\tpass\n", stderr=""
+        )
+        with patch("ariadne.github.subprocess.run", return_value=completed) as run:
+            GhClient(token=token).get_checks(7)
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["GH_TOKEN"], token)
+        self.assertNotIn(token, repr(GhClient(token=token)))
+
     def test_checks_uses_supported_text_command_and_exit_code(self):
         completed = subprocess.CompletedProcess(
             ["gh"], 0, stdout="build\tpass\n", stderr=""

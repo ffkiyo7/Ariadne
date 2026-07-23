@@ -295,13 +295,17 @@ class ConfigTests(unittest.TestCase):
     def test_secret_is_not_in_repr_or_validation_error(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
             root = Path(directory)
-            config = Config.from_env(self._env(root))
+            env = self._env(root)
+            env["ARIADNE_GITHUB_TOKEN"] = "github-private-token"
+            config = Config.from_env(env)
             self.assertNotIn("not-a-real-token", repr(config))
-            bad = self._env(root)
+            self.assertNotIn("github-private-token", repr(config))
+            bad = dict(env)
             bad["HARNESS_REPO"] = "relative/repo"
             with self.assertRaises(ConfigError) as caught:
                 Config.from_env(bad)
             self.assertNotIn("not-a-real-token", str(caught.exception))
+            self.assertNotIn("github-private-token", str(caught.exception))
 
     def test_optional_discord_mode_does_not_read_a_secret(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:

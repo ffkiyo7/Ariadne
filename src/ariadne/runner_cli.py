@@ -106,7 +106,9 @@ def run_recorded_turn(*, turn_id: str, env_path: Path) -> dict:
     values = load_env_file(env_path)
     config = Config.from_env(values)
     layout = StateLayout.from_state_dir(config.state_dir)
-    redactor = Redactor({config.discord_token} if config.discord_token else set())
+    redactor = Redactor(
+        {secret for secret in (config.discord_token, config.github_token) if secret}
+    )
     with StateStore(layout.db_path) as state:
         turn = state.get_turn(turn_id)
         provider_session = state.get_provider_session(turn.provider_session_id)

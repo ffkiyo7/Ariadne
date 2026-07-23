@@ -111,6 +111,10 @@ class Config:
     harness_repo: Path
     worktree_root: Path
     state_dir: Path
+    # Kept private like the Discord token.  It is deliberately optional so
+    # interactive developer installations that rely on `gh auth login` remain
+    # compatible; non-interactive services should configure it explicitly.
+    github_token: str | None = None
     profile: ProjectProfile = field(default_factory=ProjectProfile.default)
     profile_path: Path | None = None
     max_concurrent_runs: int = 1
@@ -212,6 +216,7 @@ class Config:
     ) -> "Config":
         env = os.environ if environ is None else environ
         token = env.get("DISCORD_TOKEN", "").strip() or None
+        github_token = env.get("ARIADNE_GITHUB_TOKEN", "").strip() or None
         if require_discord and token is None:
             raise ConfigError("missing required configuration field: DISCORD_TOKEN")
         guild = _snowflake(env, "DISCORD_ALLOWED_GUILD_ID") if require_discord else (
@@ -293,6 +298,7 @@ class Config:
             harness_repo=_path_alias(env, "ARIADNE_PROJECT_REPO", "HARNESS_REPO"),
             worktree_root=_path_alias(env, "ARIADNE_WORKTREE_ROOT", "WORKTREE_ROOT"),
             state_dir=_path_alias(env, "ARIADNE_STATE_DIR", "HARNESS_STATE_DIR"),
+            github_token=github_token,
             profile=profile,
             profile_path=profile_path,
             max_concurrent_runs=max_runs,

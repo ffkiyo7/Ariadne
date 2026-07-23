@@ -45,11 +45,15 @@ class GhClient:
         cwd=None,
         base_branch: str = "main",
         branch_prefix: str = "pipeline/",
+        token: str | None = None,
     ):
         self.executable = executable
         self.cwd = cwd
         self.base_branch = base_branch
         self.branch_prefix = branch_prefix
+        # This token is scoped exclusively to `gh` invocations below.  Do not
+        # put it in the process environment shared with model subprocesses.
+        self.token = token
 
     def _allowed_branch(self, branch: str) -> bool:
         return bool(
@@ -62,6 +66,14 @@ class GhClient:
         return result.stdout.strip()
 
     def _run_result(self, args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", str(os.path.expanduser("~"))),
+            "GH_PAGER": "cat",
+            "GIT_PAGER": "cat",
+        }
+        if self.token:
+            env["GH_TOKEN"] = self.token
         try:
             result = subprocess.run(
                 [self.executable, *args],
@@ -70,12 +82,7 @@ class GhClient:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env={
-                    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-                    "HOME": os.environ.get("HOME", str(os.path.expanduser("~"))),
-                    "GH_PAGER": "cat",
-                    "GIT_PAGER": "cat",
-                },
+                env=env,
             )
         except (OSError, subprocess.CalledProcessError) as exc:
             raise GitHubError("GitHub command failed") from exc
