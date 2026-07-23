@@ -40,9 +40,17 @@ DISCORD_ALLOWED_GUILD_ID=<private>
 DISCORD_PARENT_CHANNEL_ID=<private>
 DISCORD_OWNER_USER_ID=<private>
 CODEX_BIN=/absolute/path/to/codex-wrapper
+# Default false. Enable only after reviewing the egress trade-off documented below.
+CODEX_WORKSPACE_NETWORK_ACCESS=false
 CLAUDE_BIN=/absolute/path/to/claude
 MAX_CONCURRENT_RUNS=1
 ```
+
+`CODEX_WORKSPACE_NETWORK_ACCESS` is an explicit, per-Ariadne-runtime escape
+hatch for hosts where Codex's default network-isolated workspace sandbox cannot
+start.  It keeps filesystem writes limited to the session worktree, but it lets
+model-issued commands use network access.  Leave it `false` by default; set it
+to `true` only for a reviewed runtime with appropriate host-level egress policy.
 
 For one controlled LuxrayKit cutover, Ariadne also reads the legacy
 `HARNESS_REPO`, `WORKTREE_ROOT`, and `HARNESS_STATE_DIR` names.  New

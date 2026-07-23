@@ -337,6 +337,17 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 Config.from_env(env)
 
+    def test_codex_workspace_network_access_is_opt_in(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            env = self._env(root)
+            self.assertFalse(Config.from_env(env).codex_workspace_network_access)
+            env["CODEX_WORKSPACE_NETWORK_ACCESS"] = "true"
+            self.assertTrue(Config.from_env(env).codex_workspace_network_access)
+            env["CODEX_WORKSPACE_NETWORK_ACCESS"] = "maybe"
+            with self.assertRaises(ConfigError):
+                Config.from_env(env)
+
     def test_versioned_profile_controls_branch_and_protected_checkout_policy(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
             root = Path(directory)

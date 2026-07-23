@@ -1098,6 +1098,7 @@ if commands is not None:
                         allowed_models=allowlist,
                         allowed_efforts=self.service.config.codex_allowed_efforts,
                         redactor=self.service.redactor,
+                        workspace_network_access=self.service.config.codex_workspace_network_access,
                     )
                     if executable and allowlist
                     else None

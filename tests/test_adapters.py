@@ -102,6 +102,25 @@ class AdapterCommandTests(unittest.TestCase):
         claude_command = claude.new_command(model="a", prompt="hello", effort="max")
         self.assertEqual(claude_command[claude_command.index("--effort") + 1], "max")
 
+    def test_codex_workspace_network_access_is_explicit_and_excludes_review(self):
+        codex = CodexAdapter(
+            Path("/bin/codex"),
+            allowed_models=("a",),
+            workspace_network_access=True,
+        )
+        network_config = "sandbox_workspace_write.network_access=true"
+        self.assertIn(network_config, codex.new_command(model="a", prompt="hello"))
+        self.assertIn(
+            network_config,
+            codex.resume_command(model="a", provider_session_id="thread-1", prompt="next"),
+        )
+        self.assertNotIn(
+            network_config,
+            codex.review_command(model="a", prompt="review", base_ref="origin/main"),
+        )
+        with self.assertRaises(AdapterError):
+            CodexAdapter(Path("/bin/codex"), allowed_models=("a",), workspace_network_access="yes")
+
 
 class AdapterParsingTests(unittest.TestCase):
     def test_codex_parser_ignores_reasoning_and_normalizes_events(self):

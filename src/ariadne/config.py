@@ -91,6 +91,17 @@ def _efforts(env: Mapping[str, str], key: str, fallback: tuple[str, ...]) -> tup
     return result
 
 
+def _boolean(env: Mapping[str, str], key: str, *, default: bool = False) -> bool:
+    value = env.get(key, "").strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"configuration field must be a boolean: {key}")
+
+
 @dataclass(frozen=True, repr=False)
 class Config:
     discord_token: str | None
@@ -104,6 +115,7 @@ class Config:
     profile_path: Path | None = None
     max_concurrent_runs: int = 1
     codex_bin: Path | None = None
+    codex_workspace_network_access: bool = False
     claude_bin: Path | None = None
     hermes_bin: Path | None = None
     codex_default_model: str | None = None
@@ -128,6 +140,7 @@ class Config:
             f"profile_path={str(self.profile_path) if self.profile_path else None!r}, "
             f"max_concurrent_runs={self.max_concurrent_runs!r}, "
             f"codex_bin={str(self.codex_bin) if self.codex_bin else None!r}, "
+            f"codex_workspace_network_access={self.codex_workspace_network_access!r}, "
             f"claude_bin={str(self.claude_bin) if self.claude_bin else None!r}, "
             f"hermes_bin={str(self.hermes_bin) if self.hermes_bin else None!r}, "
             f"codex_default_model={self.codex_default_model!r}, "
@@ -284,6 +297,7 @@ class Config:
             profile_path=profile_path,
             max_concurrent_runs=max_runs,
             codex_bin=codex_bin,
+            codex_workspace_network_access=_boolean(env, "CODEX_WORKSPACE_NETWORK_ACCESS"),
             claude_bin=claude_bin,
             hermes_bin=hermes_bin,
             codex_default_model=codex_default,

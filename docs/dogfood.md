@@ -14,6 +14,14 @@ merge, touch a production credential, or invoke Wrangler.
 - The owner has reviewed the configured Discord Thread, model/effort card,
   `HERMES_BIN`, and target checkout paths.
 
+If Codex reports a sandbox startup failure involving `bwrap` loopback or
+`RTM_NEWADDR`, do not switch it to full access.  On a reviewed, isolated
+fixture-only runtime, the owner may set `CODEX_WORKSPACE_NETWORK_ACCESS=true`
+in the private environment and restart that temporary service.  This preserves
+the worktree-write filesystem boundary but permits model-issued network access;
+record that exception in the fixture audit and leave the option disabled for
+normal deployments unless their egress policy has been reviewed.
+
 ## One intended run
 
 1. Use `/dispatch` and open the configured Thread.

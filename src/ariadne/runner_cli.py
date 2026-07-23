@@ -130,6 +130,7 @@ def run_recorded_turn(*, turn_id: str, env_path: Path) -> dict:
                 allowed_models=config.codex_allowed_models,
                 allowed_efforts=config.codex_allowed_efforts,
                 redactor=redactor,
+                workspace_network_access=config.codex_workspace_network_access,
             )
         else:
             if not config.claude_bin:

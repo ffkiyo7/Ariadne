@@ -7,11 +7,36 @@ from pathlib import Path
 from typing import Iterable
 
 from ..models import Provider
+from ..redaction import Redactor
 from .base import AdapterEvent, AdapterError, ProviderAdapter, _model, _safe_text, _session_id
 
 
 class CodexAdapter(ProviderAdapter):
     provider = Provider.CODEX
+
+    def __init__(
+        self,
+        executable: Path,
+        *,
+        allowed_models: Iterable[str],
+        allowed_efforts: Iterable[str] | None = None,
+        redactor: Redactor | None = None,
+        workspace_network_access: bool = False,
+    ):
+        super().__init__(
+            executable,
+            allowed_models=allowed_models,
+            allowed_efforts=allowed_efforts,
+            redactor=redactor,
+        )
+        if not isinstance(workspace_network_access, bool):
+            raise AdapterError("Codex workspace network access must be boolean")
+        self.workspace_network_access = workspace_network_access
+
+    def _workspace_network_config(self) -> list[str]:
+        if not self.workspace_network_access:
+            return []
+        return ["-c", "sandbox_workspace_write.network_access=true"]
 
     def new_command(self, *, model: str, prompt: str, effort: str = "medium") -> list[str]:
         model = self.validate_model(model)
@@ -22,6 +47,7 @@ class CodexAdapter(ProviderAdapter):
             "--json",
             "--sandbox",
             "workspace-write",
+            *self._workspace_network_config(),
             "-c",
             f'model_reasoning_effort="{effort}"',
             "-m",
@@ -53,6 +79,7 @@ class CodexAdapter(ProviderAdapter):
             # equivalent to a fresh ``exec --sandbox workspace-write`` turn.
             "-c",
             'sandbox_mode="workspace-write"',
+            *self._workspace_network_config(),
             "-c",
             f'model_reasoning_effort="{effort}"',
             "-m",
