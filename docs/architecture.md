@@ -32,7 +32,12 @@ Hermes code work is a distinct `hermes` turn type.  It is **not** permitted to
 use the Hermes HTTP API or a direct subprocess from the Discord bot.  The
 runner starts the fixed `HERMES_BIN -z` command with `cwd=<session-worktree>`.
 On a zero exit it verifies the approved TASK hash, changed-file allowlist, and
-verification commands while the same locks are still held.  A failed
+verification commands while the same locks are still held.  Hermes must leave
+exactly one local commit that descends from the approved HEAD; the commit and
+any remaining worktree changes are independently checked against the TASK
+allowlist.  A TASK may not prohibit that required local commit, while push and
+merge remain owner-gated.  Frozen, unchanged PLAN/TASK files may remain local
+and untracked; every other dirty path blocks the later push.  A failed
 post-execution gate leaves the session in `needs_owner`, not in review.
 
 Review is deliberately a fresh, read-only turn rather than a resume of the

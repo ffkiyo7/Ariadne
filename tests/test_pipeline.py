@@ -68,6 +68,38 @@ class ParserTests(unittest.TestCase):
                 task.validate_changed_paths(["ops/service"])
             prompt = task.prompt_constraints(worktree=Path("/tmp/worktree"), branch="pipeline/S-0001")
             self.assertIn("Allowed files only", prompt)
+            self.assertIn("exactly one local commit", prompt)
+
+    def test_task_rejects_a_forbidden_local_commit_contract(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            path = Path(directory) / "TASK.md"
+            path.write_text(
+                """# Objective
+Update documentation.
+
+# Allowed files
+- `README.md`
+
+# Forbidden zones
+- Commits
+- Pushes
+
+# Interfaces
+None.
+
+# Definition of done
+The README is updated.
+
+# Verification commands
+```text
+test -f README.md
+```
+""",
+                encoding="utf-8",
+            )
+            task = parse_task(path)
+            with self.assertRaisesRegex(InvalidTask, "required local commit"):
+                task.validate_hermes_contract()
 
     def test_task_without_interface_or_verification_is_rejected(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
@@ -289,6 +321,82 @@ python3 -c "print('ok')"
                 task_baseline_json=baseline,
                 task_start_head_sha=start_head,
             )
+
+    def test_completed_task_requires_one_clean_allowed_commit(self):
+        task_path = self.root / "worktree" / "docs" / "tasks" / "TASK-readme.md"
+        task_path.parent.mkdir(parents=True, exist_ok=True)
+        task_path.write_text(
+            """# Objective
+Update the README.
+
+# Allowed files
+- `README.md`
+
+# Forbidden zones
+Do not push or merge.
+
+# Interfaces
+None.
+
+# Definition of done
+The README contains the fixture marker.
+
+# Verification commands
+```text
+test -f README.md
+```
+""",
+            encoding="utf-8",
+        )
+        task = self.controller.validate_task(session_id=self.session.id, task_path=task_path)
+        baseline = json.dumps(
+            self.controller.snapshot_task_baseline(worktree=self.root / "worktree"),
+            sort_keys=True,
+        )
+        start_head = self.controller.worktree_head_sha(worktree=self.root / "worktree")
+        readme = self.root / "worktree" / "README.md"
+        readme.write_text("clean\nfixture marker\n", encoding="utf-8")
+        with self.assertRaisesRegex(GateError, "exactly one local commit"):
+            self.controller.verify_completed_task(
+                session_id=self.session.id,
+                task=task,
+                task_baseline_json=baseline,
+                task_start_head_sha=start_head,
+            )
+        subprocess.run(
+            ["git", "-C", str(self.root / "worktree"), "add", "README.md"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git", "-C", str(self.root / "worktree"), "-c", "user.name=Harness Test",
+                "-c", "user.email=harness@example.invalid", "commit", "-m", "fixture",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        results = self.controller.verify_completed_task(
+            session_id=self.session.id,
+            task=task,
+            task_baseline_json=baseline,
+            task_start_head_sha=start_head,
+        )
+        self.assertTrue(all(result.passed for result in results))
+
+    def test_reviewed_worktree_allows_unchanged_task_baseline_only(self):
+        task_path = self.root / "worktree" / "docs" / "tasks" / "TASK-baseline.md"
+        task_path.parent.mkdir(parents=True, exist_ok=True)
+        task_path.write_text("# frozen task\n", encoding="utf-8")
+        baseline = self.controller.snapshot_task_baseline(worktree=self.root / "worktree")
+        self.state.update_pipeline_run(
+            self.session.id,
+            task_baseline_json=json.dumps(baseline, sort_keys=True),
+        )
+        self.controller.verify_reviewed_worktree_clean(session_id=self.session.id)
+        task_path.write_text("# modified task\n", encoding="utf-8")
+        with self.assertRaisesRegex(GateError, "outside the recorded TASK baseline"):
+            self.controller.verify_reviewed_worktree_clean(session_id=self.session.id)
 
     def test_green_facts_and_full_sha_are_required_for_the_only_merge_call(self):
         self.controller.record_review(session_id=self.session.id, passed=True, summary="ok")

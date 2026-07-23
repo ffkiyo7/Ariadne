@@ -70,6 +70,7 @@ class AdapterCommandTests(unittest.TestCase):
         self.assertIn('sandbox_permissions=["disk-full-read-access"]', review)
         self.assertIn('approval_policy="never"', review)
         self.assertNotIn("resume", review)
+        self.assertNotIn("review this", review)
         with self.assertRaises(AdapterError):
             adapter.new_command(model="not-allowed", prompt="hello")
         with self.assertRaises(AdapterError):

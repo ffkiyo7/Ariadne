@@ -35,7 +35,10 @@ class HermesRunnerCliTests(unittest.TestCase):
             hermes.write_text(
                 "#!/bin/sh\n"
                 "test \"$1\" = -z\n"
-                f"test \"$PWD\" = {str(worktree)!r}\n",
+                f"test \"$PWD\" = {str(worktree)!r}\n"
+                "printf 'fixture change\\n' >> README.md\n"
+                "git add README.md\n"
+                "git -c user.name='Ariadne Test' -c user.email='ariadne@example.invalid' commit -m fixture\n",
                 encoding="utf-8",
             )
             hermes.chmod(0o700)

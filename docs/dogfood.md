@@ -29,7 +29,8 @@ normal deployments unless their egress policy has been reviewed.
 3. Let it write a strict TASK that allows only the fixture Markdown file and
    includes a deterministic verification command.
 4. Use the status-card TASK action.  Confirm the transient Hermes turn, its
-   terminal result, the locked verification audit, and `review_pending`.
+   terminal result, the locked verification audit (including one local,
+   allowed-file-only commit), and `review_pending`.
 5. Use the review action, read the strong-model review transcript, and confirm
    it on the status card.
 6. Create a Draft PR, then record green CI.  Stop here: no fixture merge is

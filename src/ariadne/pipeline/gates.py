@@ -95,7 +95,9 @@ class PipelineController:
         except ValueError as exc:
             raise GateError("TASK must be inside the session worktree") from exc
         try:
-            return parse_task(task_path)
+            task = parse_task(task_path)
+            task.validate_hermes_contract()
+            return task
         except InvalidTask as exc:
             raise GateError(str(exc)) from exc
 
@@ -195,6 +197,59 @@ class PipelineController:
             for path in self.changed_paths(worktree=worktree)
         }
 
+    @staticmethod
+    def _parse_task_baseline(task_baseline_json: str) -> dict[str, str]:
+        try:
+            raw_baseline = json.loads(task_baseline_json)
+        except (TypeError, ValueError) as exc:
+            raise GateError("TASK baseline is missing or malformed") from exc
+        if (
+            not isinstance(raw_baseline, dict)
+            or any(not isinstance(path, str) or not isinstance(value, str) for path, value in raw_baseline.items())
+        ):
+            raise GateError("TASK baseline is malformed")
+        return dict(raw_baseline)
+
+    def _changes_since_task_baseline(
+        self,
+        *,
+        worktree: Path,
+        baseline: dict[str, str],
+    ) -> tuple[str, ...]:
+        """Return dirty/untracked paths that are not the frozen PLAN/TASK baseline."""
+
+        dirty_paths = self.changed_paths(worktree=worktree)
+        current = {
+            path: self._fingerprint_path(worktree=worktree, relative_path=path)
+            for path in set(baseline) | set(dirty_paths)
+        }
+        return tuple(
+            sorted(
+                path
+                for path in set(baseline) | set(current)
+                if baseline.get(path) != current.get(path)
+            )
+        )
+
+    def verify_reviewed_worktree_clean(self, *, session_id: str) -> None:
+        """Permit only unchanged pre-Hermes PLAN/TASK files before a Draft PR.
+
+        PLAN and TASK documents are deliberately kept as local owner/audit
+        artifacts.  They may be untracked on a reviewed branch, but must be
+        byte-for-byte identical to the snapshot taken before Hermes started.
+        Any other staged, unstaged, untracked, or deleted path blocks a push.
+        """
+
+        session = self.state.get_session(session_id)
+        pipeline = self.state.get_pipeline_run(session_id)
+        baseline = self._parse_task_baseline(pipeline.task_baseline_json or "{}")
+        dirty_changes = self._changes_since_task_baseline(
+            worktree=session.worktree,
+            baseline=baseline,
+        )
+        if dirty_changes:
+            raise GateError("worktree has changes outside the recorded TASK baseline")
+
     def verify_task_scope(self, *, task: TaskSpec, changed_paths: Sequence[str]) -> None:
         try:
             task.validate_changed_paths(list(changed_paths))
@@ -212,31 +267,77 @@ class PipelineController:
         """Run the deterministic post-Hermes gate before review is unlocked."""
 
         session = self.state.get_session(session_id)
+        baseline = self._parse_task_baseline(task_baseline_json)
+        current_head_sha = self.worktree_head_sha(worktree=session.worktree)
         try:
-            raw_baseline = json.loads(task_baseline_json)
-        except (TypeError, ValueError) as exc:
-            raise GateError("TASK baseline is missing or malformed") from exc
-        if (
-            not isinstance(raw_baseline, dict)
-            or any(not isinstance(path, str) or not isinstance(value, str) for path, value in raw_baseline.items())
-        ):
-            raise GateError("TASK baseline is malformed")
-        baseline = dict(raw_baseline)
-        current = {
-            path: self._fingerprint_path(worktree=session.worktree, relative_path=path)
-            for path in self.changed_paths(
-                worktree=session.worktree,
-                start_head_sha=task_start_head_sha,
+            ancestor = self.command_runner(
+                [
+                    "git",
+                    "-C",
+                    str(session.worktree),
+                    "merge-base",
+                    "--is-ancestor",
+                    task_start_head_sha,
+                    current_head_sha,
+                ],
+                cwd=session.worktree,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=build_child_environment(),
             )
-        }
-        changed = tuple(
-            sorted(
-                path
-                for path in set(baseline) | set(current)
-                if baseline.get(path) != current.get(path)
+            count_result = self.command_runner(
+                [
+                    "git",
+                    "-C",
+                    str(session.worktree),
+                    "rev-list",
+                    "--count",
+                    f"{task_start_head_sha}..{current_head_sha}",
+                ],
+                cwd=session.worktree,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=build_child_environment(),
             )
+            committed_result = self.command_runner(
+                [
+                    "git",
+                    "-C",
+                    str(session.worktree),
+                    "diff",
+                    "--name-only",
+                    f"{task_start_head_sha}..{current_head_sha}",
+                ],
+                cwd=session.worktree,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=build_child_environment(),
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise GateError("could not verify Hermes commit state") from exc
+        if ancestor.returncode != 0:
+            raise GateError("Hermes branch no longer descends from the approved TASK HEAD")
+        try:
+            commit_count = int(count_result.stdout.strip())
+        except ValueError as exc:
+            raise GateError("could not count Hermes commits") from exc
+        if commit_count != 1:
+            raise GateError("Hermes must create exactly one local commit for the approved TASK")
+        committed_paths = tuple(sorted(path for path in committed_result.stdout.splitlines() if path.strip()))
+        self.verify_task_scope(task=task, changed_paths=committed_paths)
+
+        dirty_changes = self._changes_since_task_baseline(
+            worktree=session.worktree,
+            baseline=baseline,
         )
-        self.verify_task_scope(task=task, changed_paths=changed)
+        self.verify_task_scope(task=task, changed_paths=dirty_changes)
+        changed = tuple(sorted(set(committed_paths) | set(dirty_changes)))
         results = self.run_verification(
             worktree=session.worktree,
             commands=task.verification_commands,
@@ -244,6 +345,10 @@ class PipelineController:
         failed = [result for result in results if not result.passed]
         details = {
             "task_path": str(task.path),
+            "head_sha": current_head_sha,
+            "commit_count": commit_count,
+            "committed_paths": committed_paths,
+            "dirty_paths": dirty_changes,
             "changed_paths": changed,
             "verification": [
                 {"command": list(result.command), "passed": result.passed}
@@ -386,23 +491,13 @@ class PipelineController:
                 text=True,
                 env=build_child_environment(),
             )
-            clean_result = self.command_runner(
-                ["git", "-C", str(session.worktree), "status", "--porcelain"],
-                cwd=session.worktree,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=build_child_environment(),
-            )
         except (OSError, subprocess.CalledProcessError) as exc:
             raise GateError("could not verify worktree before opening PR") from exc
         if branch_result.stdout.strip() != session.branch:
             raise GateError("worktree branch does not match the Harness session")
         if head_result.stdout.strip().lower() != head_sha.lower():
             raise GateError("worktree HEAD does not match the proposed PR head SHA")
-        if clean_result.stdout.strip():
-            raise GateError("worktree must be clean before opening a PR")
+        self.verify_reviewed_worktree_clean(session_id=session_id)
         try:
             facts = github.create_draft_pr(
                 branch=session.branch,
@@ -444,15 +539,6 @@ class PipelineController:
                 text=True,
                 env=build_child_environment(),
             ).stdout.strip()
-            clean = self.command_runner(
-                ["git", "-C", str(session.worktree), "status", "--porcelain"],
-                cwd=session.worktree,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=build_child_environment(),
-            ).stdout.strip()
             head = self.command_runner(
                 ["git", "-C", str(session.worktree), "rev-parse", "HEAD"],
                 cwd=session.worktree,
@@ -462,8 +548,9 @@ class PipelineController:
                 text=True,
                 env=build_child_environment(),
             ).stdout.strip()
-            if branch != session.branch or clean or not re.fullmatch(r"[0-9a-fA-F]{40}", head):
-                raise GateError("worktree is not a clean reviewed session branch")
+            if branch != session.branch or not re.fullmatch(r"[0-9a-fA-F]{40}", head):
+                raise GateError("worktree is not a reviewed session branch")
+            self.verify_reviewed_worktree_clean(session_id=session_id)
             self.command_runner(
                 ["git", "-C", str(session.worktree), "push", "--set-upstream", self.profile.git_remote, session.branch],
                 cwd=session.worktree,

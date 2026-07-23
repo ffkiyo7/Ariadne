@@ -35,6 +35,32 @@ class TaskSpec:
         if invalid:
             raise InvalidTask("changed files fall outside the TASK allowlist")
 
+    def validate_hermes_contract(self) -> None:
+        """Reject a TASK that conflicts with Ariadne's fixed Git lifecycle.
+
+        Hermes is required to make exactly one *local* implementation commit
+        before a clean reviewed branch can be pushed by the later owner-gated
+        Draft-PR action.  The task author controls the product scope, not that
+        lifecycle rule; leaving an explicit "no commits" instruction in the
+        forbidden-zones section gives Hermes contradictory instructions.
+        """
+
+        for raw_line in self.forbidden_zones.splitlines():
+            line = raw_line.strip().lstrip("-*• ").strip().strip("`*_ ").casefold()
+            if re.fullmatch(r"(?:git\s+)?(?:local\s+)?commits?", line):
+                raise InvalidTask(
+                    "TASK forbidden zones may not prohibit Ariadne's required local commit"
+                )
+        normalized = " ".join(self.forbidden_zones.casefold().split())
+        if re.search(r"\b(?:do not|don't|never|no)\b.{0,24}\b(?:local\s+)?commits?\b", normalized):
+            raise InvalidTask(
+                "TASK forbidden zones may not prohibit Ariadne's required local commit"
+            )
+        if re.search(r"(?:不要|禁止|不得|不可).{0,16}(?:本地)?提交", self.forbidden_zones):
+            raise InvalidTask(
+                "TASK forbidden zones may not prohibit Ariadne's required local commit"
+            )
+
     def prompt_constraints(self, *, worktree: Path, branch: str) -> str:
         files = "\n".join(f"- `{path}`" for path in self.allowed_files)
         commands = "\n".join(f"- `{command}`" for command in self.verification_commands)
@@ -47,7 +73,8 @@ class TaskSpec:
             f"Interfaces/constraints:\n{self.interfaces}\n\n"
             f"Definition of done:\n{self.definition_of_done}\n\n"
             f"Verification commands:\n{commands}\n\n"
-            "Do not edit, reset, clean, push main, expose secrets, or expand this scope."
+            "Ariadne requires exactly one local commit containing only the allowed changes after "
+            "verification. Do not push, merge, reset, clean, expose secrets, or expand this scope."
         )
 
 

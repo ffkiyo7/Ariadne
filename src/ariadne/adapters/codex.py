@@ -110,6 +110,11 @@ class CodexAdapter(ProviderAdapter):
         effort = self.validate_effort(effort)
         if not base_ref.strip():
             raise AdapterError("Codex review requires a base ref")
+        # Codex CLI permits exactly one review target: ``--base``, ``--commit``,
+        # ``--uncommitted``, or a custom prompt.  Ariadne needs the durable
+        # base-ref target, so retain the stored request as owner/audit context
+        # but do not pass it as a conflicting positional prompt.
+        del prompt
         # ``codex exec resume`` does not accept a sandbox override.  Reviews
         # deliberately use the dedicated review command instead, with its
         # disk-read-only sandbox policy, so they cannot turn into a second
@@ -128,7 +133,6 @@ class CodexAdapter(ProviderAdapter):
             'sandbox_permissions=["disk-full-read-access"]',
             "-m",
             model,
-            prompt,
         ]
 
     def parse_line(self, line: str) -> list[AdapterEvent]:
