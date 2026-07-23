@@ -5,6 +5,23 @@ fixture dogfood in [../dogfood.md](../dogfood.md) passes.  LuxrayKit stays
 untouched during the extraction.  The active r9 release and old user service
 are the rollback point.
 
+## Completed cutover record
+
+The fixture passed before the controlled switch.  The VPS now runs
+`ariadne.service` from Ariadne revision `ea05767` with a dedicated virtual
+environment and private configuration.  The service passed doctor, connected
+to the Discord Gateway, and migrated the retained state database from schema
+v5 to v9 after a private SQLite backup was created.
+
+The old `dev-pipeline-harness.service` unit file and r9 release remain in place
+for rollback, but the unit is disabled so it cannot start alongside Ariadne on
+the next user-manager restart.  The temporary fixture service is stopped, and
+its disposable deploy key/token material has been revoked.
+
+No LuxrayKit task, Draft PR, preview check, Wrangler action, or merge was run
+as part of this cutover.  The planned LuxrayKit docs-only dogfood is explicitly
+deferred by the owner.
+
 ## Target layout
 
 ```text
@@ -63,11 +80,11 @@ and env-file paths for the actual VPS.  Stop the old
 Start Ariadne, verify its `systemd --user` status, Discord gateway connection,
 and the existing state summary.  Do not delete or overwrite the old unit.
 
-The first live acceptance is the fixture dogfood.  After it is green, run a
-LuxrayKit profile task that changes only a documentation file.  Its Draft PR
-must pass CI and the existing read-only preview check; do not use Wrangler as
-part of this extraction.  A merge remains an explicit `!accept` decision by
-the owner and is outside the cutover itself.
+The fixture dogfood was the first live acceptance and passed.  The next phase
+is a LuxrayKit profile task that changes only a documentation file.  Its Draft
+PR must pass CI and the existing read-only preview check; do not use Wrangler
+as part of this extraction.  That phase is currently deferred.  A merge remains
+an explicit `!accept` decision by the owner and is outside the cutover itself.
 
 ## Rollback
 

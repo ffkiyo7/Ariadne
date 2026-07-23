@@ -4,6 +4,27 @@ The first real closed loop must run against a private fixture repository, not
 LuxrayKit.  Its task should change only one Markdown file and must not deploy,
 merge, touch a production credential, or invoke Wrangler.
 
+## Completed fixture run
+
+The fixture acceptance passed with durable state and live GitHub facts aligned:
+
+- Session `S-0001` completed the Discord → PLAN/TASK → Hermes → strong-model
+  review → owner confirmation → Draft PR → CI sequence.
+- The reviewed head was `60e0831d295461eec168a2d4319ad301360568c3` on
+  `ariadne/S-0001`.  The private fixture's Draft PR #1 contains only the
+  intended `README.md` change and remains open and unmerged.
+- Its `Fixture CI` `docs` check completed successfully; Ariadne persisted the
+  session as `ci_passed`.  The fixture profile has no preview gate.
+- A fixture-only Codex sandbox network exception was used to work around the
+  host sandbox startup failure.  It was not carried into the normal Ariadne
+  service, where `CODEX_WORKSPACE_NETWORK_ACCESS=false`.
+- The temporary fixture deploy key, VPS token copy, and worktree SSH override
+  were revoked after the result was recorded.  The Draft PR and its durable
+  audit evidence are retained.
+
+This is acceptance of the reusable engine, not authorization to merge the
+fixture PR or a claim that LuxrayKit has completed its separate dogfood.
+
 ## Preconditions
 
 - Ariadne's unit tests, source compilation, and `git diff --check` pass.
@@ -44,7 +65,7 @@ and one Draft PR whose head SHA is the reviewed branch head.  A failed test,
 scope check, stopped unit, or missing result must produce an owner-visible
 recoverable state rather than silently proceeding.
 
-Only after this passes may the VPS service source be switched to Ariadne.  The
-subsequent LuxrayKit dogfood is another docs-only Draft PR and separately
-checks CI plus the read-only preview route.  `!accept` remains a later owner
-decision.
+The VPS service source was switched to Ariadne after this pass.  The subsequent
+LuxrayKit dogfood remains a separate docs-only Draft PR with CI plus a
+read-only preview check; it is intentionally deferred at the owner's request.
+`!accept` remains a later owner decision.
