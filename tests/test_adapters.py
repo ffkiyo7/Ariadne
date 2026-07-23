@@ -32,12 +32,14 @@ class AdapterCommandTests(unittest.TestCase):
         )
         resumed = adapter.resume_command(model="b", provider_session_id="thread-1", prompt="next")
         self.assertEqual(
-            resumed[:9],
+            resumed[:11],
             [
                 "/home/ubuntu/.local/bin/codex",
                 "exec",
                 "resume",
                 "--json",
+                "-c",
+                'sandbox_mode="workspace-write"',
                 "-c",
                 'model_reasoning_effort="medium"',
                 "-m",

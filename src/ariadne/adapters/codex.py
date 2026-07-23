@@ -46,6 +46,13 @@ class CodexAdapter(ProviderAdapter):
             "exec",
             "resume",
             "--json",
+            # ``codex exec resume`` intentionally has no ``--sandbox`` flag.
+            # It does accept generic TOML config overrides, so restate the
+            # write boundary here instead of inheriting a user's possibly
+            # read-only default.  This keeps resumed implementation turns
+            # equivalent to a fresh ``exec --sandbox workspace-write`` turn.
+            "-c",
+            'sandbox_mode="workspace-write"',
             "-c",
             f'model_reasoning_effort="{effort}"',
             "-m",
