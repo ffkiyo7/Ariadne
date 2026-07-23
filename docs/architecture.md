@@ -13,6 +13,12 @@ configured model and an allowlisted effort.  Text commands cannot change the
 provider, model, or effort afterwards.  This is deliberate: a Thread is a
 reproducible provider-session boundary, not a free-form model switchboard.
 
+Codex runs are non-interactive after those owner gates, so their CLI command
+uses `approval_policy="never"` while retaining the declared sandbox mode.  It
+prevents an unavailable terminal approval prompt from becoming an implicit
+success path; it does not grant filesystem or network access beyond the
+configured sandbox.
+
 ## Durable execution
 
 Every actual Codex, Claude, Hermes, or review process is a row in SQLite and a

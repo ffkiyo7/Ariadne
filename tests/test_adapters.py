@@ -24,6 +24,8 @@ class AdapterCommandTests(unittest.TestCase):
                 "--sandbox",
                 "workspace-write",
                 "-c",
+                'approval_policy="never"',
+                "-c",
                 'model_reasoning_effort="medium"',
                 "-m",
                 "a",
@@ -32,7 +34,7 @@ class AdapterCommandTests(unittest.TestCase):
         )
         resumed = adapter.resume_command(model="b", provider_session_id="thread-1", prompt="next")
         self.assertEqual(
-            resumed[:11],
+            resumed[:13],
             [
                 "/home/ubuntu/.local/bin/codex",
                 "exec",
@@ -40,6 +42,8 @@ class AdapterCommandTests(unittest.TestCase):
                 "--json",
                 "-c",
                 'sandbox_mode="workspace-write"',
+                "-c",
+                'approval_policy="never"',
                 "-c",
                 'model_reasoning_effort="medium"',
                 "-m",
@@ -49,6 +53,7 @@ class AdapterCommandTests(unittest.TestCase):
         )
         self.assertNotIn("--ephemeral", resumed)
         self.assertIn('model_reasoning_effort="medium"', resumed)
+        self.assertIn('approval_policy="never"', resumed)
         review = adapter.review_command(
             model="a",
             prompt="review this",
@@ -63,6 +68,7 @@ class AdapterCommandTests(unittest.TestCase):
             "--json",
         ])
         self.assertIn('sandbox_permissions=["disk-full-read-access"]', review)
+        self.assertIn('approval_policy="never"', review)
         self.assertNotIn("resume", review)
         with self.assertRaises(AdapterError):
             adapter.new_command(model="not-allowed", prompt="hello")
@@ -109,9 +115,15 @@ class AdapterCommandTests(unittest.TestCase):
             workspace_network_access=True,
         )
         network_config = "sandbox_workspace_write.network_access=true"
+        approval_config = 'approval_policy="never"'
         self.assertIn(network_config, codex.new_command(model="a", prompt="hello"))
+        self.assertIn(approval_config, codex.new_command(model="a", prompt="hello"))
         self.assertIn(
             network_config,
+            codex.resume_command(model="a", provider_session_id="thread-1", prompt="next"),
+        )
+        self.assertIn(
+            approval_config,
             codex.resume_command(model="a", provider_session_id="thread-1", prompt="next"),
         )
         self.assertNotIn(

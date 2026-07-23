@@ -38,6 +38,14 @@ class CodexAdapter(ProviderAdapter):
             return []
         return ["-c", "sandbox_workspace_write.network_access=true"]
 
+    @staticmethod
+    def _noninteractive_approval_config() -> list[str]:
+        # Ariadne is a non-interactive service.  Its owner gates are applied
+        # before a provider turn is queued; asking the CLI for a fresh terminal
+        # approval cannot work inside the transient unit.  ``never`` does not
+        # expand the workspace-write/read-only sandbox boundary.
+        return ["-c", 'approval_policy="never"']
+
     def new_command(self, *, model: str, prompt: str, effort: str = "medium") -> list[str]:
         model = self.validate_model(model)
         effort = self.validate_effort(effort)
@@ -47,6 +55,7 @@ class CodexAdapter(ProviderAdapter):
             "--json",
             "--sandbox",
             "workspace-write",
+            *self._noninteractive_approval_config(),
             *self._workspace_network_config(),
             "-c",
             f'model_reasoning_effort="{effort}"',
@@ -79,6 +88,7 @@ class CodexAdapter(ProviderAdapter):
             # equivalent to a fresh ``exec --sandbox workspace-write`` turn.
             "-c",
             'sandbox_mode="workspace-write"',
+            *self._noninteractive_approval_config(),
             *self._workspace_network_config(),
             "-c",
             f'model_reasoning_effort="{effort}"',
@@ -111,6 +121,7 @@ class CodexAdapter(ProviderAdapter):
             "--base",
             base_ref,
             "--json",
+            *self._noninteractive_approval_config(),
             "-c",
             f'model_reasoning_effort="{effort}"',
             "-c",
