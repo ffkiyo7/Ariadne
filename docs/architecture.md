@@ -65,7 +65,9 @@ approve/retry TASK, retry a failed review, request review, confirm review, creat
 or submit a preview URL.  This does not replace owner judgment: the owner reads
 the review transcript and explicitly confirms it before a branch is pushed.
 The bot redraws persisted cards after every gateway reconnect, so a restart
-cannot leave the owner with a stale action surface.
+cannot leave the owner with a stale action surface.  Its scheduler also
+reconciles a card after a persisted turn-state transition even when no later
+provider transcript line is available.
 
 ## Data ownership
 

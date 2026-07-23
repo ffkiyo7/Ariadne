@@ -1056,6 +1056,7 @@ if commands is not None:
             self._synced = False
             self._dispatch_locks: dict[str, asyncio.Lock] = {}
             self._last_status_update: dict[str, float] = {}
+            self._rendered_status_revisions: dict[str, tuple[str, str, str, str, str]] = {}
             self._scheduler_task: asyncio.Task | None = None
 
         async def setup_hook(self) -> None:
@@ -1116,11 +1117,44 @@ if commands is not None:
                     await asyncio.to_thread(self.service.coordinator.reconcile)
                     await asyncio.to_thread(self.service.coordinator.start_next)
                     await self._drain_transcripts()
+                    await self._refresh_changed_status_cards()
                 except Exception:
                     # The durable turn/result state is the source of truth; a
                     # transient coordinator error is retried on the next tick.
                     pass
                 await asyncio.sleep(1)
+
+        async def _refresh_changed_status_cards(self) -> None:
+            """Refresh a card when durable state changes without a new transcript line.
+
+            A transient unit can write its final line before the runner records
+            the terminal turn state.  Transcript draining then sees no later
+            bytes to trigger its normal card refresh, so compare persisted
+            state revisions once per scheduler tick instead.
+            """
+
+            for session in await asyncio.to_thread(self.service.state.list_sessions):
+                if not session.discord_thread_id or not session.status_message_id:
+                    continue
+                try:
+                    turns = await asyncio.to_thread(self.service.state.list_turns, session.id)
+                    latest = turns[-1] if turns else None
+                    revision = (
+                        session.status.value,
+                        session.updated_at,
+                        latest.id if latest else "",
+                        latest.state.value if latest else "",
+                        latest.updated_at if latest else "",
+                    )
+                    if self._rendered_status_revisions.get(session.id) == revision:
+                        continue
+                    thread = self.get_channel(int(session.discord_thread_id))
+                    if thread is None:
+                        thread = await self.fetch_channel(int(session.discord_thread_id))
+                    await self._refresh_status(thread, session.id, force=True)
+                    self._rendered_status_revisions[session.id] = revision
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException, StateError, ValueError):
+                    continue
 
         def _adapter_for_turn(self, turn: Turn) -> ProviderAdapter | None:
             if turn.execution_kind is TurnKind.HERMES:
