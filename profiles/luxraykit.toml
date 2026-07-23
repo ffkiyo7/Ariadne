@@ -1,0 +1,13 @@
+[project]
+id = "luxraykit"
+
+[git]
+remote = "origin"
+base_branch = "main"
+branch_prefix = "pipeline/"
+
+[workflow]
+plan_directory = "docs/plans"
+task_directory = "docs/tasks"
+protected_sibling_checkouts = ["LuxrayKit-maintenance"]
+preview_required = true

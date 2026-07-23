@@ -1,0 +1,19 @@
+[Unit]
+Description=Ariadne recoverable development workflow
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Ariadne
+EnvironmentFile=%h/.config/ariadne/env
+ExecStartPre=%h/.local/share/ariadne/venv/bin/python -m ariadne doctor --env-file %h/.config/ariadne/env
+ExecStart=%h/.local/share/ariadne/venv/bin/python -m ariadne bot --env-file %h/.config/ariadne/env
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=default.target

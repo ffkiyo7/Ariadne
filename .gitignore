@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.coverage
+build/
+dist/
+*.egg-info/
+
+# Ariadne runtime state, provider transcripts, local config, and worktrees are
+# deliberately outside this repository.  Keep accidental local variants out.
+.ariadne/
+env
