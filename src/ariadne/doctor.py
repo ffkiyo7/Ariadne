@@ -47,12 +47,25 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
-def _run(args: list[str], *, cwd: Path | None = None) -> tuple[bool, str]:
+def _run(
+    args: list[str],
+    *,
+    cwd: Path | None = None,
+    extra_env: Mapping[str, str] | None = None,
+) -> tuple[bool, str]:
     inherited = {
         key: os.environ[key]
         for key in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_CONFIG_HOME", "XDG_DATA_HOME")
         if os.environ.get(key)
     }
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", str(Path.home())),
+        "LANG": "C",
+        **inherited,
+    }
+    if extra_env:
+        env.update(extra_env)
     try:
         result = subprocess.run(
             args,
@@ -61,12 +74,7 @@ def _run(args: list[str], *, cwd: Path | None = None) -> tuple[bool, str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env={
-                "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-                "HOME": os.environ.get("HOME", str(Path.home())),
-                "LANG": "C",
-                **inherited,
-            },
+            env=env,
         )
     except OSError:
         return False, "executable unavailable"
@@ -86,6 +94,18 @@ def _check_login(path: Path, *, label: str) -> DoctorCheck:
     status_args = ("login", "status") if label == "Codex" else ("auth", "status")
     ok, _detail = _run([str(path), *status_args])
     return DoctorCheck(f"{label} auth", ok, "login check passed" if ok else "login status could not be verified")
+
+
+def _check_github(token: str | None) -> DoctorCheck:
+    """Verify a scoped service token without exposing account or token data."""
+
+    if token:
+        ok, _detail = _run(["gh", "api", "user"], extra_env={"GH_TOKEN": token})
+        detail = "service token check passed" if ok else "service token could not be verified"
+    else:
+        ok, _detail = _run(["gh", "auth", "status"])
+        detail = "gh auth check passed" if ok else "gh auth status could not be verified"
+    return DoctorCheck("GitHub", ok, detail)
 
 
 def run_doctor(*, env_path: Path) -> tuple[bool, tuple[DoctorCheck, ...]]:
@@ -160,8 +180,7 @@ def run_doctor(*, env_path: Path) -> tuple[bool, tuple[DoctorCheck, ...]]:
     except OSError:
         clean = False
     checks.append(DoctorCheck("service checkout", clean, "checkout is clean" if clean else "service checkout must be clean"))
-    gh_ok, _ = _run(["gh", "auth", "status"])
-    checks.append(DoctorCheck("GitHub", gh_ok, "gh auth check passed" if gh_ok else "gh auth status could not be verified"))
+    checks.append(_check_github(config.github_token))
     systemd_ok, _ = _run(["systemd-run", "--user", "--wait", "--collect", "/usr/bin/true"])
     checks.append(DoctorCheck("systemd user", systemd_ok, "systemd --user transient check passed" if systemd_ok else "systemd --user is unavailable"))
     runner_ok, _ = _run(["systemctl", "--user", "is-active", "--quiet", "ariadne"])

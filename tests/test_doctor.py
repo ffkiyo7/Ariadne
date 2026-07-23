@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ariadne.doctor import _check_login, install_codex_wrapper, load_env_file
+from ariadne.doctor import _check_github, _check_login, install_codex_wrapper, load_env_file
 
 
 class DoctorTests(unittest.TestCase):
@@ -18,6 +18,15 @@ class DoctorTests(unittest.TestCase):
 
         self.assertEqual(run.call_args_list[0].args[0], ["/usr/bin/codex", "login", "status"])
         self.assertEqual(run.call_args_list[1].args[0], ["/usr/bin/claude", "auth", "status"])
+
+    def test_github_service_token_is_only_given_to_github_check(self):
+        token = "github-private-token"
+        with patch("ariadne.doctor._run", return_value=(True, "ok")) as run:
+            check = _check_github(token)
+        self.assertTrue(check.passed)
+        self.assertEqual(run.call_args.args[0], ["gh", "api", "user"])
+        self.assertEqual(run.call_args.kwargs["extra_env"], {"GH_TOKEN": token})
+        self.assertNotIn(token, check.detail)
 
     def test_env_parser_and_wrapper_never_copy_auth(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
