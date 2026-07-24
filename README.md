@@ -28,6 +28,7 @@ green.
 Useful entry points:
 
 - [Architecture and lifecycle](docs/architecture.md)
+- [Collaboration loop: clarification, decision pack, retry, knowledge](docs/collaboration-loop.md)
 - [Project profile contract](docs/reference/project-profile.md)
 - [LuxrayKit migration/cutover](docs/migration/luxraykit-cutover.md)
 - [Fixture dogfood procedure](docs/dogfood.md)

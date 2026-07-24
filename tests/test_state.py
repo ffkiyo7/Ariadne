@@ -89,7 +89,14 @@ class StateStoreTests(unittest.TestCase):
                 for row in migrated._connection.execute("PRAGMA table_info(pipeline_runs)")
             }
             version = migrated._connection.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(version, 9)
+            tables = {
+                row[0]
+                for row in migrated._connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+        self.assertEqual(version, 10)
+        self.assertTrue({"clarifications", "posted_cards"}.issubset(tables))
         self.assertIn("execution_kind", turn_columns)
         self.assertTrue(
             {

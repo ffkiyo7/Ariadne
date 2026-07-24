@@ -18,6 +18,7 @@ plan_directory = "docs/plans"
 task_directory = "docs/tasks"
 protected_sibling_checkouts = ["example-project-maintenance"]
 preview_required = true
+knowledge_file = "docs/dev-knowledge.md"
 ```
 
 `id` is lowercase letters, digits, and hyphens.  `plan_directory` and
@@ -25,6 +26,13 @@ preview_required = true
 `protected_sibling_checkouts` names direct siblings of the target checkout;
 they are rejected as worktree destinations.  A branch must be exactly
 `<branch_prefix>S-####` before Ariadne will push it or create a Draft PR.
+
+`knowledge_file` is optional.  When set, it must be a safe relative Markdown
+path; Ariadne silently adds it to every TASK allowlist and instructs the
+worker to read it before implementing and to append short, dated, factual
+entries in the same reviewed commit.  It is the workers' shared project
+journal.  `AGENTS.md` is deliberately not writable through this mechanism:
+promoting journal entries into owner-curated guidance stays an owner action.
 
 Private environment example (with placeholders only):
 

@@ -11,16 +11,22 @@ from pathlib import Path
 
 from .adapters import ClaudeAdapter, CodexAdapter
 from .adapters.sessions import ProviderSessionController
+from .clarification import (
+    CLARIFICATION_FILENAME,
+    InvalidClarification,
+    parse_clarification_file,
+)
 from .config import Config
 from .doctor import load_env_file
-from .filesystem import StateLayout
+from .filesystem import StateLayout, ensure_private_file
 from .hermes import HermesExecutionError, HermesExecutor
 from .models import Provider, TurnKind
 from .pipeline.gates import GateError, PipelineController
 from .pipeline.task_parser import InvalidTask, parse_task
 from .redaction import Redactor
+from .retry_context import build_retry_context
 from .runner import TurnRunner, build_child_environment
-from .state import StateStore
+from .state import StateError, StateStore
 
 
 def _default_env_path() -> Path:
@@ -31,6 +37,71 @@ def _default_env_path() -> Path:
     return root / "dev-pipeline-harness" / "env"
 
 
+def _record_clarification_outcome(
+    *,
+    state: StateStore,
+    layout: StateLayout,
+    pipeline_controller: PipelineController,
+    session,
+    pipeline,
+    turn,
+    redactor: Redactor,
+) -> str:
+    """Validate and persist a NEEDS_CLARIFICATION outcome; return the turn summary.
+
+    The clarification protocol requires: no commit, no change besides the
+    clarification file, and all five sections filled.  A violated protocol is
+    reported as an ordinary gate failure so a half-implemented turn cannot
+    disguise itself as a question.
+    """
+
+    clarification_path = session.worktree / CLARIFICATION_FILENAME
+    head = pipeline_controller.worktree_head_sha(worktree=session.worktree)
+    if head.lower() != (pipeline.task_start_head_sha or "").lower():
+        return "clarification file present but commits were made; the TASK requires exactly one outcome"
+    changes = pipeline_controller.changes_since_baseline(
+        worktree=session.worktree,
+        task_baseline_json=pipeline.task_baseline_json or "{}",
+    )
+    if set(changes) != {CLARIFICATION_FILENAME}:
+        return "clarification must be the only worktree change besides the recorded baseline"
+    try:
+        request = parse_clarification_file(clarification_path)
+    except InvalidClarification as exc:
+        return f"clarification file is invalid: {exc}"
+    copy_path = layout.session_dir(session.id) / f"clarification-{turn.id}.md"
+    ensure_private_file(copy_path)
+    copy_path.write_text(clarification_path.read_text(encoding="utf-8"), encoding="utf-8")
+    copy_path.chmod(0o600)
+    try:
+        state.record_clarification(
+            harness_session_id=session.id,
+            turn_id=turn.id,
+            blocker=redactor.redact(request.blocker),
+            insufficiency=redactor.redact(request.insufficiency),
+            options=redactor.redact(request.options),
+            recommendation=redactor.redact(request.recommendation),
+            impact=redactor.redact(request.impact),
+        )
+    except StateError:
+        return "clarification could not be recorded; inspect the private session directory"
+    state.record_audit(
+        actor="hermes",
+        action="hermes-clarification",
+        harness_session_id=session.id,
+        turn_id=turn.id,
+        unit_name=turn.unit_name,
+        details_json=json.dumps(
+            {"raw_path": str(copy_path)}, ensure_ascii=False, sort_keys=True
+        ),
+    )
+    # Remove the protocol file so the worktree returns to its recorded
+    # baseline; the durable copy and DB row are the owner-facing artifacts.
+    clarification_path.unlink(missing_ok=True)
+    first_line = request.blocker.strip().splitlines()[0] if request.blocker.strip() else ""
+    return "NEEDS_CLARIFICATION: " + redactor.redact(first_line)[:300]
+
+
 def _run_hermes_turn(*, config: Config, state: StateStore, layout: StateLayout, turn, redactor: Redactor) -> dict:
     provider_session = state.get_provider_session(turn.provider_session_id)
     session = state.get_session(provider_session.harness_session_id)
@@ -38,6 +109,11 @@ def _run_hermes_turn(*, config: Config, state: StateStore, layout: StateLayout, 
     def fail(summary: str) -> dict:
         return TurnRunner(state=state, layout=layout, redactor=redactor).record_failure(turn.id, summary)
 
+    pipeline_controller = PipelineController(
+        state=state,
+        redactor=redactor,
+        profile=config.profile,
+    )
     if pipeline.task_turn_id != turn.id or not pipeline.task_path or not pipeline.task_hash:
         return fail("recorded Hermes TASK is missing or does not belong to this turn")
     try:
@@ -46,16 +122,22 @@ def _run_hermes_turn(*, config: Config, state: StateStore, layout: StateLayout, 
         digest = hashlib.sha256(task_path.read_bytes()).hexdigest()
         if digest != pipeline.task_hash:
             raise RuntimeError("approved TASK changed after it was queued")
-        task = parse_task(task_path)
+        task = pipeline_controller.scoped_task(parse_task(task_path))
     except (OSError, InvalidTask, ValueError):
         return fail("approved TASK is no longer usable")
     if not config.hermes_bin:
         return fail("HERMES_BIN is not configured")
+    retry_context = build_retry_context(state, harness_session_id=session.id)
+    knowledge_file = (
+        config.profile.knowledge_file.as_posix() if config.profile.knowledge_file else None
+    )
     try:
         command = HermesExecutor(executable=config.hermes_bin, redactor=redactor).build_command(
             task=task,
             worktree=session.worktree,
             branch=session.branch,
+            retry_context=retry_context,
+            knowledge_file=knowledge_file,
         )
     except HermesExecutionError:
         return fail("could not build the controlled Hermes command")
@@ -70,18 +152,24 @@ def _run_hermes_turn(*, config: Config, state: StateStore, layout: StateLayout, 
                 "cwd": str(session.worktree),
                 "task_path": str(task_path),
                 "task_hash": pipeline.task_hash,
+                "retry_context": bool(retry_context),
             },
             ensure_ascii=False,
             sort_keys=True,
         ),
     )
-    pipeline_controller = PipelineController(
-        state=state,
-        redactor=redactor,
-        profile=config.profile,
-    )
 
     def validate_completion() -> str | None:
+        if (session.worktree / CLARIFICATION_FILENAME).exists():
+            return _record_clarification_outcome(
+                state=state,
+                layout=layout,
+                pipeline_controller=pipeline_controller,
+                session=session,
+                pipeline=pipeline,
+                turn=turn,
+                redactor=redactor,
+            )
         try:
             pipeline_controller.verify_completed_task(
                 session_id=session.id,

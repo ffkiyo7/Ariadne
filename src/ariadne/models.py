@@ -145,6 +145,32 @@ class Turn:
 
 
 @dataclass(frozen=True)
+class Clarification:
+    """A durable NEEDS_CLARIFICATION request recorded from a worker turn."""
+
+    id: int
+    harness_session_id: str
+    turn_id: str
+    blocker: str
+    insufficiency: str
+    options: str
+    recommendation: str
+    impact: str
+    posted_message_id: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class AuditFact:
+    """One recorded audit event, exposed read-only for loop feedback."""
+
+    id: int
+    action: str
+    details_json: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class PipelineRun:
     id: int
     harness_session_id: str

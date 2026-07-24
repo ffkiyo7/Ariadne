@@ -374,6 +374,71 @@ test -f README.md
             1,
         )
 
+    def test_review_pending_can_be_returned_for_revision_and_feeds_the_next_round(self):
+        start = self.service.start_from_source(
+            source_message_id="source-revise",
+            source_content="Start",
+            provider_name="codex",
+        )
+        worktree = self.worktrees.root / start.session_id
+        plan = worktree / "docs" / "plans" / "PLAN-revise.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# PLAN\n\nSafe docs-only change.\n", encoding="utf-8")
+        initial = self.state.list_turns(start.session_id)[0]
+        self.state.claim_next()
+        self.state.finalize_turn(initial.id, state=TurnState.SUCCEEDED, exit_code=0)
+        self.service.handle_control(session_id=start.session_id, command=parse_control("!approve PLAN-revise"))
+        task = worktree / "docs" / "tasks" / "TASK-revise.md"
+        task.parent.mkdir(parents=True)
+        task.write_text(
+            """# Objective
+Update the documentation.
+
+# Allowed files
+- `README.md`
+
+# Forbidden zones
+Do not push or merge.
+
+# Interfaces
+None.
+
+# Definition of done
+The README is updated.
+
+# Verification commands
+```text
+test -f README.md
+```
+""",
+            encoding="utf-8",
+        )
+        self.service.handle_control(session_id=start.session_id, command=parse_control("!task TASK-revise"))
+        hermes = self.state.list_turns(start.session_id)[-1]
+        self.state.claim_next()
+        self.state.finalize_turn(hermes.id, state=TurnState.SUCCEEDED, exit_code=0)
+        review = self.service.request_review(session_id=start.session_id)
+        # The structured review contract is part of the request pack.
+        request_text = review.input_path.read_text(encoding="utf-8")
+        for heading in ("## 结论", "## 改动核对", "## TASK 充分性"):
+            self.assertIn(heading, request_text)
+        self.state.claim_next()
+        self.state.finalize_turn(review.id, state=TurnState.SUCCEEDED, exit_code=0)
+
+        with self.assertRaises(discord_bot.GateError):
+            self.service.return_for_revision(session_id=start.session_id, feedback="   ")
+        self.service.return_for_revision(
+            session_id=start.session_id, feedback="review 指出边界条件遗漏，请改用查表实现"
+        )
+        self.assertEqual(self.state.get_session(start.session_id).status, SessionStatus.NEEDS_OWNER)
+        # Re-approval is possible again, and the feedback reaches the next round.
+        self.service.handle_control(session_id=start.session_id, command=parse_control("!task TASK-revise"))
+        from ariadne.retry_context import build_retry_context
+
+        context = build_retry_context(self.state, harness_session_id=start.session_id)
+        assert context is not None
+        self.assertIn("查表实现", context)
+
     def test_owner_message_enqueues_one_turn_after_configuration_is_fixed(self):
         start = self.service.start_from_source(
             source_message_id="source-1",

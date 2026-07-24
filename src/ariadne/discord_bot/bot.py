@@ -15,11 +15,14 @@ from ..commands import CommandParseError, ControlCommand, command_help, parse_co
 from ..adapters import ClaudeAdapter, CodexAdapter
 from ..adapters.base import AdapterEvent, ProviderAdapter
 from ..config import Config, ConfigError
+from ..decision_pack import DecisionPack, DecisionPackError, build_decision_pack, decision_pack_detail_text
 from ..filesystem import StateLayout, ensure_private_file
 from ..formatting import StatusCard, build_status_card, status_card_text
 from ..models import (
+    Clarification,
     Dispatch,
     DispatchStatus,
+    HarnessSession,
     Provider,
     ProviderSession,
     SessionStatus,
@@ -356,6 +359,36 @@ class DiscordHarnessService:
             input_path=input_path,
         )
 
+    def _jump_link(self, session: HarnessSession, message_id: str | None) -> str | None:
+        if not message_id or not session.discord_thread_id or not self.config.allowed_guild_id:
+            return None
+        return (
+            f"https://discord.com/channels/{self.config.allowed_guild_id}/"
+            f"{session.discord_thread_id}/{message_id}"
+        )
+
+    def _card_links(self, session: HarnessSession, turns: list[Turn]) -> tuple[tuple[str, str], ...]:
+        links: list[tuple[str, str]] = []
+        clarification = self.state.latest_clarification(session.id)
+        if clarification is not None:
+            url = self._jump_link(session, clarification.posted_message_id)
+            if url:
+                links.append(("📌 提问卡", f"[跳转]({url})"))
+        review_turn = next(
+            (
+                turn
+                for turn in reversed(turns)
+                if turn.execution_kind is TurnKind.REVIEW and turn.state is TurnState.SUCCEEDED
+            ),
+            None,
+        )
+        if review_turn is not None:
+            message_id = self.state.find_posted_card(kind="decision-pack", turn_id=review_turn.id)
+            url = self._jump_link(session, message_id)
+            if url:
+                links.append(("📌 决策包", f"[跳转]({url})"))
+        return tuple(links)
+
     def status_card(self, session_id: str) -> StatusCard:
         session = self.state.get_session(session_id)
         providers = self.state.list_provider_sessions(session_id)
@@ -370,6 +403,7 @@ class DiscordHarnessService:
             queue_position=queue_position,
             error_summary=turn.error_summary if turn else None,
             redactor=self.redactor,
+            links=self._card_links(session, turns),
         )
 
     @staticmethod
@@ -471,8 +505,19 @@ class DiscordHarnessService:
         request_path.write_text(
             "# Ariadne review request\n\n"
             "Review the completed approved TASK in the current worktree. Do not edit files, commit, push, "
-            "merge, expose secrets, or expand scope. Inspect the diff, the recorded TASK and verification results. "
-            "State a clear pass/fail recommendation and any remaining risks for the owner.\n\n"
+            "merge, expose secrets, or expand scope. Inspect the diff, the recorded TASK and verification results.\n\n"
+            "Your FINAL message is read by the owner instead of the diff. Structure it exactly with "
+            "these Markdown sections:\n\n"
+            "## 结论\n"
+            "PASS 或 FAIL，加一句话理由。\n\n"
+            "## 改动核对\n"
+            "用你自己的话说明 diff 实际做了什么、动了哪些文件、实现者的自述（commit message）与 diff 是否一致。\n\n"
+            "## 行为变化\n"
+            "用户或系统可观察到的行为差异；没有则写\"无\"。\n\n"
+            "## 风险与遗留\n"
+            "剩余风险、测试盲区、后续建议。\n\n"
+            "## TASK 充分性\n"
+            "这份 TASK 的规格是否足以无歧义实现？如果实现者本应先请求澄清而没有，请明确指出。\n\n"
             f"TASK: `{pipeline.task_path}`\n"
             f"Hermes turn: `{task_turn.id}`\n"
             f"Branch: `{session.branch}`\n",
@@ -500,6 +545,41 @@ class DiscordHarnessService:
             details_json=json.dumps({"task_turn_id": task_turn.id}, ensure_ascii=False),
         )
         return turn
+
+    def return_for_revision(self, *, session_id: str, feedback: str) -> None:
+        """Close the review loop: send the session back for a revised TASK.
+
+        The feedback is durable audit evidence and is automatically fed into
+        the next Hermes attempt as previous-round context, so the loop is
+        fail -> evidence -> explicit revision -> retry, not blind repetition.
+        """
+
+        feedback = feedback.strip()
+        if not feedback:
+            raise GateError("修订反馈不能为空；它会作为下一轮 Hermes 的回灌证据")
+        session = self.state.get_session(session_id)
+        if session.status is not SessionStatus.REVIEW_PENDING:
+            raise GateError("只有 review_pending 状态可以打回修订")
+        active = [turn for turn in self.state.list_turns(session_id) if not turn.state.terminal]
+        if active:
+            raise GateError("有 turn 正在运行；请等待其终止后再打回")
+        self.state.record_audit(
+            actor=str(self.config.owner_user_id or "owner"),
+            action="owner-return-for-revision",
+            harness_session_id=session_id,
+            details_json=json.dumps(
+                {"feedback": self.redactor.redact(feedback)[:2000]},
+                ensure_ascii=False,
+            ),
+        )
+        self.state.transition_session(session_id, SessionStatus.NEEDS_OWNER)
+
+    def build_decision_pack(self, session_id: str) -> DecisionPack:
+        return build_decision_pack(
+            self.state,
+            harness_session_id=session_id,
+            profile=self.config.profile,
+        )
 
     def confirm_review(self, *, session_id: str) -> None:
         session = self.state.get_session(session_id)
@@ -987,6 +1067,64 @@ if commands is not None:
             await self.bot.submit_preview(interaction, self.session_id, self.url_input.value)
 
 
+    class ReturnForRevisionButton(discord.ui.Button):
+        def __init__(self, *, session_id: str):
+            super().__init__(
+                label="打回并修订 TASK…",
+                style=discord.ButtonStyle.danger,
+                custom_id=f"pipeline:{session_id}:revise",
+            )
+            self.session_id = session_id
+
+        async def callback(self, interaction: discord.Interaction) -> None:
+            assert isinstance(self.view, PipelineActionView)
+            await self.view.open_revision_modal(interaction)
+
+
+    class ReturnForRevisionModal(discord.ui.Modal, title="打回并修订 TASK"):
+        def __init__(self, *, bot: "DiscordHarnessBot", session_id: str):
+            super().__init__(custom_id=f"pipeline:{session_id}:revise-modal")
+            self.bot = bot
+            self.session_id = session_id
+            self.feedback_input = discord.ui.TextInput(
+                label="修订反馈（会回灌给下一轮 Hermes）",
+                style=discord.TextStyle.paragraph,
+                placeholder="review 指出的问题、你希望改变的方向、遗漏的约束。",
+                min_length=1,
+                max_length=2000,
+                required=True,
+            )
+            self.add_item(self.feedback_input)
+
+        async def on_submit(self, interaction: discord.Interaction) -> None:
+            await self.bot.submit_return_for_revision(
+                interaction, self.session_id, self.feedback_input.value
+            )
+
+
+    class DecisionPackDetailButton(discord.ui.Button):
+        def __init__(self, *, session_id: str):
+            super().__init__(
+                label="事实详情",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"pack:{session_id}:detail",
+            )
+            self.session_id = session_id
+
+        async def callback(self, interaction: discord.Interaction) -> None:
+            assert isinstance(self.view, DecisionPackView)
+            await self.view.bot.send_decision_pack_detail(interaction, self.session_id)
+
+
+    class DecisionPackView(discord.ui.View):
+        """Fold-equivalent for Discord: facts stay one click away, ephemeral."""
+
+        def __init__(self, *, bot: "DiscordHarnessBot", session_id: str):
+            super().__init__(timeout=None)
+            self.bot = bot
+            self.add_item(DecisionPackDetailButton(session_id=session_id))
+
+
     class PipelineActionView(discord.ui.View):
         """One persistent, state-derived action surface on the status card."""
 
@@ -1012,11 +1150,13 @@ if commands is not None:
             elif session.status is SessionStatus.REVIEW_PENDING:
                 if latest and latest.execution_kind is TurnKind.HERMES and latest.state is TurnState.SUCCEEDED:
                     self.add_item(RequestReviewButton(session_id=session_id))
+                    self.add_item(ReturnForRevisionButton(session_id=session_id))
                 elif latest and latest.execution_kind is TurnKind.REVIEW and latest.state is TurnState.SUCCEEDED:
                     if pipeline.review_round < 1:
                         self.add_item(ConfirmReviewButton(session_id=session_id))
                     else:
                         self.add_item(DraftPRButton(session_id=session_id))
+                    self.add_item(ReturnForRevisionButton(session_id=session_id))
             elif session.status is SessionStatus.PR_OPEN:
                 self.add_item(CheckCIButton(session_id=session_id))
             elif session.status is SessionStatus.CI_PASSED and bot.service.config.profile.preview_required:
@@ -1028,6 +1168,9 @@ if commands is not None:
 
         async def open_task_modal(self, interaction: discord.Interaction) -> None:
             await self.bot.open_task_modal(interaction, self.session_id)
+
+        async def open_revision_modal(self, interaction: discord.Interaction) -> None:
+            await self.bot.open_revision_modal(interaction, self.session_id)
 
         async def request_review(self, interaction: discord.Interaction) -> None:
             await self.bot.queue_review(interaction, self.session_id)
@@ -1058,6 +1201,10 @@ if commands is not None:
             self._last_status_update: dict[str, float] = {}
             self._rendered_status_revisions: dict[str, tuple[str, str, str, str, str]] = {}
             self._scheduler_task: asyncio.Task | None = None
+            # Turn ids whose decision pack could not be built this process
+            # lifetime; prevents a broken worktree from re-spawning git every
+            # scheduler tick.
+            self._decision_pack_failures: set[str] = set()
 
         async def setup_hook(self) -> None:
             guild = discord.Object(id=int(self.service.config.allowed_guild_id))
@@ -1094,6 +1241,16 @@ if commands is not None:
                             self.add_view(view, message_id=int(session.status_message_id))
                 except (StateError, ValueError):
                     continue
+            for _turn_id, pack_session_id, message_id in await asyncio.to_thread(
+                self.service.state.list_posted_cards, kind="decision-pack"
+            ):
+                try:
+                    self.add_view(
+                        DecisionPackView(bot=self, session_id=pack_session_id),
+                        message_id=int(message_id),
+                    )
+                except ValueError:
+                    continue
             self._synced = True
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
 
@@ -1118,11 +1275,128 @@ if commands is not None:
                     await asyncio.to_thread(self.service.coordinator.start_next)
                     await self._drain_transcripts()
                     await self._refresh_changed_status_cards()
+                    await self._post_pending_cards()
                 except Exception:
                     # The durable turn/result state is the source of truth; a
                     # transient coordinator error is retried on the next tick.
                     pass
                 await asyncio.sleep(1)
+
+        def _clarification_embed(self, session_id: str, clarification: Clarification):
+            redact = self.service.redactor.redact
+            embed = discord.Embed(
+                title=f"{session_id} 需要澄清 · {clarification.turn_id}",
+                description=redact(clarification.blocker)[:4000],
+                colour=discord.Colour.orange(),
+            )
+            for name, value in (
+                ("TASK 缺陷", clarification.insufficiency),
+                ("选项", clarification.options),
+                ("Hermes 的建议", clarification.recommendation),
+                ("理由与影响", clarification.impact),
+            ):
+                embed.add_field(name=name, value=redact(value)[:1024] or "-", inline=False)
+            embed.set_footer(text="修订 TASK 后在状态卡重新批准；本卡内容会自动回灌给下一轮 Hermes。")
+            return embed
+
+        def _decision_pack_embed(self, pack: DecisionPack):
+            redact = self.service.redactor.redact
+            failed = pack.mismatches or pack.reviewer_verdict == "FAIL"
+            colour = discord.Colour.red() if failed else discord.Colour.green()
+            title_verdict = pack.reviewer_verdict or "无结论"
+            embed = discord.Embed(
+                title=f"{pack.harness_session_id} 决策包 · review {title_verdict}",
+                description=redact(
+                    f"**{pack.implementer_subject}**\n\n{pack.implementer_body}"
+                )[:4000],
+                colour=colour,
+            )
+            for name, value in pack.reviewer_sections:
+                embed.add_field(name=f"Review · {name}", value=redact(value)[:1024] or "-", inline=False)
+            passed = sum(1 for _, ok in pack.verification if ok)
+            facts = (
+                f"{pack.shortstat or '无 diffstat'} · {len(pack.committed)} 个文件 · "
+                f"验证 {passed}/{len(pack.verification) or 0} 通过"
+                + (" · 含知识库更新" if pack.knowledge_updated else "")
+            )
+            embed.add_field(name="事实脚注", value=facts[:1024], inline=False)
+            if pack.mismatches:
+                embed.add_field(
+                    name="❗ 自述与事实不一致",
+                    value=redact("\n".join(f"- {item}" for item in pack.mismatches))[:1024],
+                    inline=False,
+                )
+            embed.set_footer(text="主体是模型自述；按「事实详情」核对 Git/验证事实与完整 head SHA。")
+            return embed
+
+        async def _fetch_session_thread(self, session):
+            thread = self.get_channel(int(session.discord_thread_id))
+            if thread is None:
+                thread = await self.fetch_channel(int(session.discord_thread_id))
+            return thread
+
+        async def _post_pending_cards(self) -> None:
+            """Post clarification cards and decision packs exactly once each."""
+
+            for clarification in await asyncio.to_thread(self.service.state.list_unposted_clarifications):
+                try:
+                    session = await asyncio.to_thread(
+                        self.service.state.get_session, clarification.harness_session_id
+                    )
+                    if not session.discord_thread_id:
+                        continue
+                    thread = await self._fetch_session_thread(session)
+                    sent = await thread.send(embed=self._clarification_embed(session.id, clarification))
+                    await asyncio.to_thread(
+                        self.service.state.mark_clarification_posted,
+                        clarification.id,
+                        str(sent.id),
+                    )
+                    await self._refresh_status(thread, session.id, force=True)
+                except (StateError, ValueError, discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+
+            for session in await asyncio.to_thread(self.service.state.list_sessions):
+                if session.status is not SessionStatus.REVIEW_PENDING or not session.discord_thread_id:
+                    continue
+                try:
+                    turns = await asyncio.to_thread(self.service.state.list_turns, session.id)
+                    latest = turns[-1] if turns else None
+                    if (
+                        latest is None
+                        or latest.execution_kind is not TurnKind.REVIEW
+                        or latest.state is not TurnState.SUCCEEDED
+                        or latest.id in self._decision_pack_failures
+                    ):
+                        continue
+                    already = await asyncio.to_thread(
+                        self.service.state.find_posted_card,
+                        kind="decision-pack",
+                        turn_id=latest.id,
+                    )
+                    if already:
+                        continue
+                    pack = await asyncio.to_thread(self.service.build_decision_pack, session.id)
+                    thread = await self._fetch_session_thread(session)
+                    sent = await thread.send(
+                        embed=self._decision_pack_embed(pack),
+                        view=DecisionPackView(bot=self, session_id=session.id),
+                    )
+                    await asyncio.to_thread(
+                        self.service.state.record_posted_card,
+                        kind="decision-pack",
+                        turn_id=latest.id,
+                        harness_session_id=session.id,
+                        message_id=str(sent.id),
+                    )
+                    await self._refresh_status(thread, session.id, force=True)
+                except DecisionPackError:
+                    # Facts could not be assembled; the raw transcript remains
+                    # the owner's fallback for this turn.
+                    self._decision_pack_failures.add(latest.id)
+                    continue
+                except (StateError, ValueError, discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
 
         async def _refresh_changed_status_cards(self) -> None:
             """Refresh a card when durable state changes without a new transcript line.
@@ -1447,6 +1721,58 @@ if commands is not None:
                     ephemeral=True,
                 )
             except (StateError, GateError) as exc:
+                if interaction.response.is_done():
+                    await interaction.followup.send(str(exc), ephemeral=True)
+                else:
+                    await interaction.response.send_message(str(exc), ephemeral=True)
+
+        async def open_revision_modal(self, interaction: discord.Interaction, session_id: str) -> None:
+            try:
+                if not self._session_interaction_allowed(interaction, session_id):
+                    raise StateError("此操作仅限配置的 owner 和目标 Harness Thread")
+                await interaction.response.send_modal(ReturnForRevisionModal(bot=self, session_id=session_id))
+            except StateError as exc:
+                if interaction.response.is_done():
+                    await interaction.followup.send(str(exc), ephemeral=True)
+                else:
+                    await interaction.response.send_message(str(exc), ephemeral=True)
+
+        async def submit_return_for_revision(
+            self, interaction: discord.Interaction, session_id: str, feedback: str
+        ) -> None:
+            try:
+                if not self._session_interaction_allowed(interaction, session_id):
+                    raise StateError("此操作仅限配置的 owner 和目标 Harness Thread")
+                await interaction.response.defer(ephemeral=True)
+                await asyncio.to_thread(
+                    self.service.return_for_revision, session_id=session_id, feedback=feedback
+                )
+                await self._refresh_pipeline_card(interaction, session_id)
+                await interaction.followup.send(
+                    "已打回。请在 Thread 中修订 TASK 后重新批准；你的反馈会自动回灌给下一轮 Hermes。",
+                    ephemeral=True,
+                )
+            except (StateError, GateError) as exc:
+                if interaction.response.is_done():
+                    await interaction.followup.send(str(exc), ephemeral=True)
+                else:
+                    await interaction.response.send_message(str(exc), ephemeral=True)
+
+        async def send_decision_pack_detail(self, interaction: discord.Interaction, session_id: str) -> None:
+            try:
+                if not self._session_interaction_allowed(interaction, session_id):
+                    raise StateError("此操作仅限配置的 owner 和目标 Harness Thread")
+                await interaction.response.defer(ephemeral=True)
+                pack = await asyncio.to_thread(self.service.build_decision_pack, session_id)
+                text = self.service.redactor.redact(decision_pack_detail_text(pack))
+                for start in range(0, len(text), 1900):
+                    await interaction.followup.send(text[start : start + 1900], ephemeral=True)
+            except DecisionPackError:
+                await interaction.followup.send(
+                    "决策包事实无法重建（worktree 可能已不存在）；请查看原始转录与 PR。",
+                    ephemeral=True,
+                )
+            except StateError as exc:
                 if interaction.response.is_done():
                     await interaction.followup.send(str(exc), ephemeral=True)
                 else:

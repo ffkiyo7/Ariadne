@@ -46,6 +46,18 @@ policy, while Claude receives no `Edit` or `Write` tool.  Review output is
 transcribed but its provider-session id is never adopted as a later editing
 session.
 
+A Hermes turn has a second legitimate terminal outcome besides one commit:
+a structured `ARIADNE-CLARIFICATION.md` request with no other change, which
+lands the session in `needs_owner` with a question card in the Thread.  A
+retried TASK automatically receives bounded previous-round evidence, and a
+completed review can be sent back for TASK revision with owner feedback.
+When a review completes, the bot posts a decision pack whose primary content
+is the implementer's commit self-report and the reviewer's structured
+conclusion, with Git/verification facts cross-checked against the narrative
+and mismatches flagged.  See
+[collaboration-loop.md](collaboration-loop.md) for the mechanisms and their
+rationale.
+
 ## Pipeline gates
 
 ```text
