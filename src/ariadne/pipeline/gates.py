@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from ..clarification import CLARIFICATION_FILENAME
 from ..github import ChecksFacts, GitHubClient, GitHubError, PullRequestFacts
 from ..models import SessionStatus
 from ..preview import PreviewHealthChecker
@@ -246,6 +247,27 @@ class PipelineController:
                 for path in set(baseline) | set(current)
                 if baseline.get(path) != current.get(path)
             )
+        )
+
+    def draft_scope_drift(self, *, worktree: Path) -> tuple[str, ...]:
+        """Worktree changes a drafting turn should not have made.
+
+        During the drafting phase the only legitimate writes are Markdown
+        under the profile's plan/task directories.  Codex drafting turns keep
+        a workspace-write sandbox (it has no path-scoped write mode), so this
+        deterministic check is the backstop that makes silent implementation
+        visible to the owner.
+        """
+
+        allowed_prefixes = (
+            self.profile.plan_directory.as_posix() + "/",
+            self.profile.task_directory.as_posix() + "/",
+        )
+        changed = self.changed_paths(worktree=worktree)
+        return tuple(
+            path
+            for path in changed
+            if not path.startswith(allowed_prefixes) and path != CLARIFICATION_FILENAME
         )
 
     def changes_since_baseline(

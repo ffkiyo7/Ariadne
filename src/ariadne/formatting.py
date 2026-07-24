@@ -15,6 +15,31 @@ class StatusCard:
     fields: tuple[tuple[str, str], ...]
 
 
+def chunk_message(text: str, limit: int = 1900) -> list[str]:
+    """Split long text on line boundaries instead of hard character cuts.
+
+    A hard cut at position N breaks sentences mid-word and produces the
+    "full-width then broken" rendering in Discord.  Prefer the last newline
+    before the limit; fall back to a hard cut only for a single line longer
+    than the limit.
+    """
+
+    if limit < 1:
+        raise ValueError("chunk limit must be positive")
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        cut = remaining.rfind("\n", 0, limit + 1)
+        if cut <= 0:
+            cut = limit
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    return [chunk for chunk in chunks if chunk.strip()]
+
+
 def build_status_card(
     *,
     session: HarnessSession,

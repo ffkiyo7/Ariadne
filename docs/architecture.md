@@ -28,6 +28,18 @@ result.  On restart, the coordinator either finds the live unit, imports the
 terminal result, or marks the turn interrupted; it never assumes an in-memory
 pipe can be reconnected.
 
+Drafting/consultation is the ordinary `provider` turn type and is confined by
+tools, not by prompt wording.  A Claude drafting turn receives a read-only tool
+core plus `Edit`/`Write` scoped only to the profile's plan and task
+directories, so it physically cannot implement application code; a conversation
+message from the owner is framed as clarification and never advances a phase.
+Only an explicit status-card action (approve PLAN, approve TASK) crosses a gate.
+Codex drafting keeps a workspace-write sandbox with no path scoping, so a
+deterministic drift check surfaces any change outside the plan/task directories
+on the status card before the owner approves anything.  The S-0007 incident —
+where a drafting turn implemented a whole feature and a chat "批准" was read as
+authorization — is what these boundaries prevent.
+
 Hermes code work is a distinct `hermes` turn type.  It is **not** permitted to
 use the Hermes HTTP API or a direct subprocess from the Discord bot.  The
 runner starts the fixed `HERMES_BIN -z` command with `cwd=<session-worktree>`.

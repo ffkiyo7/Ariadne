@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 from .adapters import ClaudeAdapter, CodexAdapter
+from .adapters.claude import DEFAULT_ALLOWED_TOOLS, draft_allowed_tools
 from .adapters.sessions import ProviderSessionController
 from .clarification import (
     CLARIFICATION_FILENAME,
@@ -225,10 +226,23 @@ def run_recorded_turn(*, turn_id: str, env_path: Path) -> dict:
         else:
             if not config.claude_bin:
                 raise RuntimeError("CLAUDE_BIN is not configured")
+            # A provider turn is a drafting/consultation turn: read-only plus
+            # write access scoped to the PLAN/TASK directories.  Review turns
+            # override the tool list to a strict read-only set inside the
+            # adapter, so passing draft tools here is harmless for them.
+            claude_tools = (
+                DEFAULT_ALLOWED_TOOLS
+                if turn.execution_kind is TurnKind.REVIEW
+                else draft_allowed_tools(
+                    config.profile.plan_directory.as_posix(),
+                    config.profile.task_directory.as_posix(),
+                )
+            )
             adapter = ClaudeAdapter(
                 config.claude_bin,
                 allowed_models=config.claude_allowed_models,
                 allowed_efforts=config.claude_allowed_efforts,
+                allowed_tools=claude_tools,
                 redactor=redactor,
             )
         if turn.execution_kind is TurnKind.REVIEW:

@@ -374,6 +374,58 @@ test -f README.md
             1,
         )
 
+    def test_owner_message_is_clarification_and_only_a_button_advances_the_plan(self):
+        start = self.service.start_from_source(
+            source_message_id="source-plan-gate",
+            source_content="Add a daily-pick feature.",
+            provider_name="claude",
+        )
+        session_id = start.session_id
+        worktree = self.worktrees.root / session_id
+        # Drive the initial drafting turn to completion -> waiting_for_owner.
+        initial = self.state.list_turns(session_id)[0]
+        self.state.claim_next()
+        self.state.finalize_turn(initial.id, state=TurnState.SUCCEEDED, exit_code=0)
+        self.assertEqual(self.state.get_session(session_id).status, SessionStatus.WAITING_FOR_OWNER)
+
+        # No PLAN file yet: nothing is approvable and the card says so.
+        self.assertEqual(self.service.detect_plan_candidates(session_id), ())
+        card = self.service.status_card(session_id)
+        card_text = "\n".join(f"{k}:{v}" for k, v in card.fields)
+        self.assertIn("未检测到新 PLAN", card_text)
+
+        # An owner chat message must NOT advance the phase; it enqueues a
+        # drafting/clarification turn and the session stays waiting_for_owner.
+        turn = self.service.enqueue_owner_message(
+            session_id=session_id,
+            owner_message_id="owner-clarify-1",
+            content="批准，进入实现吧",
+        )
+        # The message queues a drafting turn (QUEUED) but never crosses into an
+        # approval phase; a conversational "批准" is not a gate.
+        self.assertEqual(self.state.get_session(session_id).status, SessionStatus.QUEUED)
+        prompt = turn.input_path.read_text(encoding="utf-8")
+        self.assertIn("clarification", prompt.lower())
+        self.assertIn("NOT an approval", prompt)
+        self.state.claim_next()
+        self.state.finalize_turn(turn.id, state=TurnState.SUCCEEDED, exit_code=0)
+        self.assertEqual(self.state.get_session(session_id).status, SessionStatus.WAITING_FOR_OWNER)
+
+        # The drafting turn produces a PLAN file: now it is an approval candidate.
+        plan_dir = worktree / "docs" / "plans"
+        plan_dir.mkdir(parents=True)
+        (plan_dir / "PLAN-daily-pick.md").write_text("# PLAN\n\nDaily pick.\n", encoding="utf-8")
+        # A forced status refresh (which fires on turn finalization) invalidates
+        # the short detection cache; mirror that here.
+        self.service.invalidate_candidates(session_id)
+        candidates = self.service.detect_plan_candidates(session_id)
+        self.assertEqual([Path(p).stem for p in candidates], ["PLAN-daily-pick"])
+
+        # The explicit button action is the only thing that advances the phase.
+        approved = self.service.approve_plan(session_id=session_id, plan_selector="PLAN-daily-pick")
+        self.assertEqual(approved, "PLAN-daily-pick.md")
+        self.assertEqual(self.state.get_session(session_id).status, SessionStatus.PLAN_APPROVED)
+
     def test_review_pending_can_be_returned_for_revision_and_feeds_the_next_round(self):
         start = self.service.start_from_source(
             source_message_id="source-revise",
