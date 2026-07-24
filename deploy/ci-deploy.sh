@@ -106,9 +106,11 @@ fi
 log "deploy ${PREVIOUS:0:12} -> ${target:0:12}"
 
 git fetch --quiet origin
-git merge-base --is-ancestor "$target" "origin/$BRANCH" ||
+# An unknown commit makes merge-base fail loudly; the refusal below is the
+# useful message, so keep git's own complaint out of the CI log.
+git merge-base --is-ancestor "$target" "origin/$BRANCH" 2>/dev/null ||
     die "${target:0:12} is not reachable from origin/$BRANCH"
-git merge-base --is-ancestor "$PREVIOUS" "$target" ||
+git merge-base --is-ancestor "$PREVIOUS" "$target" 2>/dev/null ||
     die "${target:0:12} is not a fast-forward from ${PREVIOUS:0:12}; revert on $BRANCH instead"
 
 git merge --ff-only --quiet "$target"
