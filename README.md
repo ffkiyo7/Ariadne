@@ -32,4 +32,6 @@ Useful entry points:
 - [Project profile contract](docs/reference/project-profile.md)
 - [LuxrayKit migration/cutover](docs/migration/luxraykit-cutover.md)
 - [Fixture dogfood procedure](docs/dogfood.md)
+- [Deployment: CI, the restricted VPS endpoint, rollback](docs/deploy.md)
+- [Self-hosting design note (deferred, not implemented)](docs/self-hosting.md)
 - [Source-document audit](docs/migration/luxraykit-source-audit.md)
