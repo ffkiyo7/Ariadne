@@ -1,7 +1,11 @@
 name: CI
 
+# main is protected and takes pull requests only, so a branch is always tested
+# through its pull request.  Listening for both events on every branch would
+# just run the suite twice for the same commit.
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
