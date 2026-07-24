@@ -152,6 +152,19 @@ class ClarificationParserTests(unittest.TestCase):
         with self.assertRaisesRegex(InvalidClarification, "recommendation"):
             parse_clarification(CLARIFICATION_TEXT.split("## Recommendation")[0])
 
+    def test_glossed_and_emphasised_headings_still_parse(self):
+        """The worker writes Chinese prose under an English section contract."""
+
+        glossed = (
+            CLARIFICATION_TEXT.replace("## Blocker", "## Blocker（阻塞点）")
+            .replace("## Options", "## **Options / 可选方案**")
+            .replace("## Recommendation", "## 3. Recommendation（建议）")
+        )
+        parsed = parse_clarification(glossed)
+        self.assertIn("missing.py", parsed.blocker)
+        self.assertIn("Extend the allowlist", parsed.options)
+        self.assertIn("Option 2", parsed.recommendation)
+
 
 class ClarificationFlowTests(unittest.TestCase):
     def test_worker_question_becomes_a_durable_needs_owner_state(self):

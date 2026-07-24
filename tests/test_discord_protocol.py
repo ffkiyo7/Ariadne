@@ -318,6 +318,88 @@ python3 -c "print('ok')"
         pipeline = self.state.get_pipeline_run(start.session_id)
         self.assertEqual(pipeline.task_turn_id, turn.id)
 
+    def _start_plan_approved_session(self, source_message_id: str) -> str:
+        start = self.service.start_from_source(
+            source_message_id=source_message_id,
+            source_content="Start",
+            provider_name="codex",
+        )
+        worktree = self.worktrees.root / start.session_id
+        plan = worktree / "docs" / "plans" / "PLAN-safe.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# PLAN\n\nSafe docs-only change.\n", encoding="utf-8")
+        initial = self.state.list_turns(start.session_id)[0]
+        self.state.claim_next()
+        self.state.finalize_turn(initial.id, state=TurnState.SUCCEEDED, exit_code=0)
+        self.service.handle_control(
+            session_id=start.session_id, command=parse_control("!approve PLAN-safe")
+        )
+        return start.session_id
+
+    def test_no_task_is_approvable_between_plan_approval_and_the_drafted_task(self):
+        session_id = self._start_plan_approved_session("source-task-gap")
+        worktree = self.worktrees.root / session_id
+        self.assertEqual(self.service.task_approval_candidates(session_id), ())
+        self.assertFalse(self.service.task_directory_has_markdown(session_id))
+
+        task = worktree / "docs" / "tasks" / "TASK-safe.md"
+        task.parent.mkdir(parents=True)
+        task.write_text("# 目标\n更新文档。\n", encoding="utf-8")
+        # Candidate detection is cached for a few seconds; a test writing the
+        # TASK immediately after asking would otherwise read the stale answer.
+        self.service._candidate_cache.clear()
+
+        self.assertEqual(self.service.task_approval_candidates(session_id), ("TASK-safe",))
+        self.assertTrue(self.service.task_directory_has_markdown(session_id))
+
+    def test_committed_task_stays_approvable_for_a_retry(self):
+        session_id = self._start_plan_approved_session("source-task-committed")
+        worktree = self.worktrees.root / session_id
+        task = worktree / "docs" / "tasks" / "TASK-safe.md"
+        task.parent.mkdir(parents=True)
+        task.write_text("# 目标\n更新文档。\n", encoding="utf-8")
+        self.state.update_pipeline_run(session_id, task_path=task)
+        subprocess.run(
+            ["git", "-C", str(worktree), "add", "docs"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git", "-C", str(worktree), "-c", "user.name=Ariadne Test",
+                "-c", "user.email=ariadne@example.invalid", "commit", "-m", "task",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.service._candidate_cache.clear()
+
+        # The TASK is no longer a working-tree change, so only the recorded
+        # path keeps the NEEDS_OWNER retry reachable from the status card.
+        self.assertEqual(self.service.detect_task_candidates(session_id), ())
+        self.assertEqual(self.service.task_approval_candidates(session_id), ("TASK-safe",))
+
+    @unittest.skipIf(discord_bot.commands is None, "discord.py is not installed")
+    def test_task_actions_track_whether_a_task_exists(self):
+        session_id = self._start_plan_approved_session("source-task-view")
+        worktree = self.worktrees.root / session_id
+        bot = SimpleNamespace(service=self.service)
+
+        empty = discord_bot.PipelineActionView(bot=bot, session_id=session_id)
+        self.assertEqual([item.custom_id for item in empty.children], [])
+
+        task = worktree / "docs" / "tasks" / "TASK-safe.md"
+        task.parent.mkdir(parents=True)
+        task.write_text("# 目标\n更新文档。\n", encoding="utf-8")
+        self.service._candidate_cache.clear()
+
+        drafted = discord_bot.PipelineActionView(bot=bot, session_id=session_id)
+        self.assertEqual(
+            [item.custom_id.rsplit(":", 1)[-1] for item in drafted.children], ["task-direct"]
+        )
+
     def test_failed_review_can_retry_without_reexecuting_hermes(self):
         start = self.service.start_from_source(
             source_message_id="source-review-retry",

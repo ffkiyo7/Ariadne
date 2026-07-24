@@ -8,9 +8,10 @@ in the runner's completion gate.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from .sections import build_alias_lookup, collect_sections
 
 
 CLARIFICATION_FILENAME = "ARIADNE-CLARIFICATION.md"
@@ -46,31 +47,11 @@ _ALIASES = {
 }
 
 
-def _heading_key(text: str) -> str:
-    text = re.sub(r"^\s*#+\s*", "", text).strip().rstrip(":")
-    return text.casefold()
+_ALIAS_LOOKUP = build_alias_lookup(_ALIASES)
 
 
 def _sections(text: str) -> dict[str, str]:
-    found: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in text.splitlines():
-        if re.match(r"^\s*#{1,6}\s+", line):
-            key = _heading_key(line)
-            current = next(
-                (
-                    name
-                    for name, aliases in _ALIASES.items()
-                    if key in {alias.casefold() for alias in aliases}
-                ),
-                None,
-            )
-            if current:
-                found.setdefault(current, [])
-            continue
-        if current:
-            found[current].append(line)
-    return {key: "\n".join(value).strip() for key, value in found.items()}
+    return collect_sections(text, _ALIAS_LOOKUP)
 
 
 def parse_clarification(text: str) -> ClarificationRequest:

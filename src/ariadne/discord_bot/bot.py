@@ -175,8 +175,13 @@ class DiscordHarnessService:
                 "status-card actions.\n\n"
                 f"Write your plan as `{plan_dir}/PLAN-<slug>.md` - the owner can only approve a plan that "
                 f"exists as a file there. When the owner asks for a TASK, write `{task_dir}/TASK-<slug>.md` "
-                "with the sections: objective, allowed files, forbidden zones, interfaces, definition of "
-                "done, verification commands. A TASK's forbidden zones must not prohibit the worker's "
+                "with exactly these six Markdown headings, spelled this way (a parenthetical translation "
+                "such as `## objective（目标）` is fine, nothing else is): `## objective`, "
+                "`## allowed files`, `## forbidden zones`, `## interfaces`, `## definition of done`, "
+                "`## verification commands`. Under `allowed files` write one repository-relative path or "
+                "glob per bullet and put every path in backticks, because that list is enforced verbatim "
+                "against the worker's diff; under `verification commands` write one runnable command per "
+                "bullet or fenced line. A TASK's forbidden zones must not prohibit the worker's "
                 "required single local commit; TASKs must still prohibit push, merge, reset, clean, "
                 "deployment, credential exposure, and any out-of-scope work.\n\n"
                 "Owner chat messages are clarification and discussion only; they are never an approval "
@@ -456,9 +461,9 @@ class DiscordHarnessService:
                 value = f"未检测到新 PLAN 文件；请让模型写入 `{plan_dir}/`"
             return (("PLAN", value[:1024]),) + self._draft_drift_field(session)
         if session.status in {SessionStatus.PLAN_APPROVED, SessionStatus.NEEDS_OWNER}:
-            tasks = self.detect_task_candidates(session.id)
+            tasks = self.task_approval_candidates(session.id)
             if tasks:
-                value = "可批准：" + "、".join(Path(path).stem for path in tasks[:3])
+                value = "可批准：" + "、".join(tasks[:3])
             else:
                 value = f"未检测到新 TASK 文件；请让模型写入 `{task_dir}/`"
             # Drift is only meaningful before any Hermes turn: in NEEDS_OWNER
@@ -557,6 +562,30 @@ class DiscordHarnessService:
     def detect_task_candidates(self, session_id: str) -> tuple[str, ...]:
         session = self.state.get_session(session_id)
         return self._detect_changed_markdown(session, self.config.profile.task_directory)
+
+    def task_approval_candidates(self, session_id: str) -> tuple[str, ...]:
+        """TASK stems the owner can actually approve right now.
+
+        Detection is diff-based, so a TASK a failed Hermes attempt already
+        committed stops looking like a change; carrying the recorded TASK keeps
+        the NEEDS_OWNER retry reachable from the card instead of the modal.
+        """
+
+        stems = [Path(path).stem for path in self.detect_task_candidates(session_id)]
+        try:
+            pipeline = self.state.get_pipeline_run(session_id)
+        except NotFoundError:
+            pipeline = None
+        if pipeline is not None and pipeline.task_path is not None and pipeline.task_path.is_file():
+            stems.append(pipeline.task_path.stem)
+        return tuple(dict.fromkeys(stems))
+
+    def task_directory_has_markdown(self, session_id: str) -> bool:
+        """Whether the profile TASK directory holds any Markdown at all."""
+
+        session = self.state.get_session(session_id)
+        task_root = self.config.profile.task_root(session.worktree)
+        return task_root.is_dir() and any(task_root.rglob("*.md"))
 
     def approve_plan(self, *, session_id: str, plan_selector: str) -> str:
         """Owner-gated PLAN approval; the only path into plan_approved."""
@@ -1418,12 +1447,23 @@ if commands is not None:
                 self.add_item(AcceptButton(session_id=session_id))
 
         def _add_task_actions(self, bot: "DiscordHarnessBot", session_id: str, *, retry: bool) -> None:
-            stems = [Path(path).stem for path in bot.service.detect_task_candidates(session_id)]
+            """Offer a TASK approval only when there is a TASK to approve.
+
+            An always-present approval control misreports the state between plan
+            approval and the drafted TASK, and duplicates the named button once
+            the TASK lands.  The id-entry modal survives only as the escape hatch
+            for a TASK that exists on disk but detection did not surface.
+            """
+
+            stems = list(bot.service.task_approval_candidates(session_id))
             if len(stems) == 1:
                 self.add_item(TaskApproveNowButton(session_id=session_id, task_stem=stems[0], retry=retry))
-            elif stems:
+                return
+            if stems:
                 self.add_item(TaskApprovalSelect(session_id=session_id, stems=stems))
-            self.add_item(TaskApprovalButton(session_id=session_id, retry=retry))
+                return
+            if bot.service.task_directory_has_markdown(session_id):
+                self.add_item(TaskApprovalButton(session_id=session_id, retry=retry))
 
         @property
         def has_actions(self) -> bool:

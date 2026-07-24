@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from ..sections import build_alias_lookup, collect_sections
+
 
 class InvalidTask(ValueError):
     pass
@@ -79,34 +81,55 @@ class TaskSpec:
 
 
 _ALIASES = {
-    "objective": {"目标", "objective", "goal"},
-    "allowed": {"允许改动", "允许修改文件", "allowed files", "allowed changes"},
-    "forbidden": {"禁区", "禁止事项", "forbidden", "forbidden zones", "不可做"},
-    "interfaces": {"接口", "实施要求", "interfaces", "constraints", "implementation requirements"},
-    "dod": {"dod", "definition of done", "完成定义", "完成条件"},
-    "verification": {"验证命令", "验收命令", "verification commands", "verification"},
+    "objective": {"目标", "目的", "objective", "objectives", "goal"},
+    "allowed": {
+        "允许改动",
+        "允许修改文件",
+        "允许改动文件",
+        "允许的文件",
+        "allowed files",
+        "allowed paths",
+        "allowed changes",
+    },
+    "forbidden": {"禁区", "禁止事项", "禁止改动", "forbidden", "forbidden zones", "不可做"},
+    "interfaces": {
+        "接口",
+        "接口约定",
+        "实施要求",
+        "interfaces",
+        "constraints",
+        "implementation requirements",
+    },
+    "dod": {"dod", "definition of done", "完成定义", "完成条件", "验收标准"},
+    "verification": {
+        "验证",
+        "验证命令",
+        "验证步骤",
+        "验收命令",
+        "verification",
+        "verification commands",
+        "verification steps",
+    },
 }
 
-
-def _heading_key(text: str) -> str:
-    text = re.sub(r"^\s*#+\s*", "", text).strip().rstrip(":")
-    return text.casefold()
+_ALIAS_LOOKUP = build_alias_lookup(_ALIASES)
 
 
 def _sections(text: str) -> dict[str, str]:
-    lines = text.splitlines()
-    found: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in lines:
-        if re.match(r"^\s*#{1,6}\s+", line):
-            key = _heading_key(line)
-            current = next((name for name, aliases in _ALIASES.items() if key in {a.casefold() for a in aliases}), None)
-            if current:
-                found.setdefault(current, [])
-            continue
-        if current:
-            found[current].append(line)
-    return {key: "\n".join(value).strip() for key, value in found.items()}
+    return collect_sections(text, _ALIAS_LOOKUP)
+
+
+_CODE_SPAN = re.compile(r"`([^`\n]+)`")
+
+
+def _looks_like_path(value: str) -> bool:
+    """Whether one token is a path or glob rather than prose or an identifier."""
+
+    if not value or any(character.isspace() for character in value):
+        return False
+    if any(character in value for character in "/\\*?"):
+        return True
+    return bool(re.fullmatch(r"[\w.\-+@]+\.[A-Za-z0-9_]+", value))
 
 
 def _parse_allowed(body: str) -> tuple[str, ...]:
@@ -116,7 +139,16 @@ def _parse_allowed(body: str) -> tuple[str, ...]:
         if line.strip().startswith("```"):
             in_fence = not in_fence
             continue
-        item = line.strip().lstrip("-* ").strip().strip("`")
+        stripped = line.strip()
+        if not in_fence and not stripped.startswith("|"):
+            # A bullet routinely annotates its path ("新增 `src/a.ts`——类型定义"),
+            # and the annotation itself may contain slashed prose.  When the line
+            # marks paths up as code spans, only those spans are the allowlist.
+            spans = [span for span in _CODE_SPAN.findall(stripped) if _looks_like_path(span)]
+            if spans:
+                values.extend(spans)
+                continue
+        item = stripped.lstrip("-* ").strip().strip("`")
         if not item or item.startswith("#"):
             continue
         if item.startswith("|"):
