@@ -50,12 +50,19 @@ class FakeWorktrees:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        base_sha = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).stdout.strip()
         self.created.append(session_id)
         return WorktreeInfo(
             session_id=session_id,
             path=path,
             branch=selected_branch,
-            base_sha="0" * 40,
+            base_sha=base_sha,
         )
 
 
@@ -146,7 +153,16 @@ class DiscordServiceTests(unittest.TestCase):
         self.assertIn("requested model", text)
         self.assertNotIn("discord-secret", text)
         pipeline = self.state.get_pipeline_run(first.session_id)
-        self.assertEqual(pipeline.base_sha, "0" * 40)
+        self.assertEqual(
+            pipeline.base_sha,
+            subprocess.run(
+                ["git", "-C", str(self.worktrees.root / first.session_id), "rev-parse", "HEAD"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).stdout.strip(),
+        )
 
     def test_dispatch_waits_for_provider_choice_and_is_idempotent(self):
         dispatch = self.service.create_dispatch(
@@ -267,6 +283,48 @@ class DiscordServiceTests(unittest.TestCase):
         )
         self.assertIn("已批准", response)
         self.assertEqual(self.state.get_session(start.session_id).status.value, "plan_approved")
+
+    def test_plan_approval_blocks_drafting_code_and_commits(self):
+        start = self.service.start_from_source(
+            source_message_id="source-drafting-boundary",
+            source_content="Start",
+            provider_name="codex",
+        )
+        worktree = self.worktrees.root / start.session_id
+        plan = worktree / "docs" / "plans" / "PLAN-safe.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# PLAN\n\nSafe change.\n", encoding="utf-8")
+        app = worktree / "src" / "App.tsx"
+        app.parent.mkdir()
+        app.write_text("drafting implementation\n", encoding="utf-8")
+        initial = self.state.list_turns(start.session_id)[0]
+        self.state.claim_next()
+        self.state.finalize_turn(initial.id, state=TurnState.SUCCEEDED, exit_code=0)
+
+        with self.assertRaisesRegex(discord_bot.GateError, "outside the PLAN/TASK"):
+            self.service.approve_plan(
+                session_id=start.session_id,
+                plan_selector="PLAN-safe",
+            )
+
+        subprocess.run(
+            ["git", "-C", str(worktree), "add", "src/App.tsx"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git", "-C", str(worktree), "-c", "user.name=Ariadne Test",
+                "-c", "user.email=ariadne@example.invalid", "commit", "-m", "drafting code",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        with self.assertRaisesRegex(discord_bot.GateError, "changed Git HEAD"):
+            self.service.approve_plan(
+                session_id=start.session_id,
+                plan_selector="PLAN-safe",
+            )
 
     def test_owner_approved_task_becomes_a_durable_hermes_turn(self):
         start = self.service.start_from_source(

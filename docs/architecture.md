@@ -35,9 +35,12 @@ directories, so it physically cannot implement application code; a conversation
 message from the owner is framed as clarification and never advances a phase.
 Only an explicit status-card action (approve PLAN, approve TASK) crosses a gate.
 Codex drafting keeps a workspace-write sandbox with no path scoping, so a
-deterministic drift check surfaces any change outside the plan/task directories
-on the status card before the owner approves anything.  The S-0007 incident —
-where a drafting turn implemented a whole feature and a chat "批准" was read as
+deterministic completion gate fails any turn that moves Git HEAD or changes
+anything outside Markdown files in the plan/task directories.  PLAN and first
+TASK approval repeat that check against the recorded session base, and the TASK
+baseline refuses to absorb application changes.  The status card is only the
+visible warning; approval remains fail-closed.  The S-0007 incident — where a
+drafting turn implemented a whole feature and a chat "批准" was read as
 authorization — is what these boundaries prevent.
 
 Hermes code work is a distinct `hermes` turn type.  It is **not** permitted to

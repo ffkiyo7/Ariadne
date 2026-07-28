@@ -13,7 +13,7 @@ from ariadne.adapters.claude import (
 )
 from ariadne.filesystem import StateLayout
 from ariadne.formatting import chunk_message
-from ariadne.pipeline.gates import PipelineController
+from ariadne.pipeline.gates import GateError, PipelineController
 from ariadne.profile import ProjectProfile
 from ariadne.state import StateStore
 
@@ -88,6 +88,56 @@ class DraftScopeDriftTests(unittest.TestCase):
                 drift = controller.draft_scope_drift(worktree=worktree)
                 self.assertIn("src/App.tsx", drift)
                 self.assertNotIn("docs/plans/PLAN-daily.md", drift)
+
+    def test_provider_turn_cannot_change_code_or_commit(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            worktree = self._repo(root)
+            layout = StateLayout.from_state_dir(root / "state").ensure()
+            with StateStore(layout.db_path) as state:
+                controller = PipelineController(state=state, profile=ProjectProfile.default())
+                start_head = controller.worktree_head_sha(worktree=worktree)
+                baseline = controller.snapshot_worktree_changes(worktree=worktree)
+
+                (worktree / "src").mkdir()
+                (worktree / "src" / "App.tsx").write_text("code\n", encoding="utf-8")
+                with self.assertRaisesRegex(GateError, "outside the PLAN/TASK"):
+                    controller.verify_drafting_turn(
+                        worktree=worktree,
+                        start_head_sha=start_head,
+                        start_baseline=baseline,
+                    )
+
+                subprocess.run(
+                    ["git", "-C", str(worktree), "add", "src/App.tsx"],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                )
+                subprocess.run(
+                    [
+                        "git", "-C", str(worktree), "-c", "user.name=T",
+                        "-c", "user.email=t@e.invalid", "commit", "-m", "drafting code",
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                )
+                with self.assertRaisesRegex(GateError, "changed Git HEAD"):
+                    controller.verify_drafting_turn(
+                        worktree=worktree,
+                        start_head_sha=start_head,
+                        start_baseline=baseline,
+                    )
+
+    def test_task_baseline_rejects_non_artifact_files(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            worktree = self._repo(root)
+            layout = StateLayout.from_state_dir(root / "state").ensure()
+            with StateStore(layout.db_path) as state:
+                controller = PipelineController(state=state, profile=ProjectProfile.default())
+                (worktree / "README.md").write_text("drafting implementation\n", encoding="utf-8")
+                with self.assertRaisesRegex(GateError, "TASK baseline"):
+                    controller.snapshot_task_baseline(worktree=worktree)
 
 
 class ChunkMessageTests(unittest.TestCase):

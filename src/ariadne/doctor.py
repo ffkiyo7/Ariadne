@@ -96,6 +96,50 @@ def _check_login(path: Path, *, label: str) -> DoctorCheck:
     return DoctorCheck(f"{label} auth", ok, "login check passed" if ok else "login status could not be verified")
 
 
+def _check_codex_contract(path: Path) -> DoctorCheck:
+    """Verify the CLI flags Ariadne relies on without starting a model turn."""
+
+    def read_help(*args: str) -> tuple[bool, str]:
+        try:
+            result = subprocess.run(
+                [str(path), *args, "--help"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env={
+                    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                    "HOME": os.environ.get("HOME", str(Path.home())),
+                    "LANG": "C",
+                },
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False, ""
+        return result.returncode == 0, result.stdout + result.stderr
+
+    ok_exec, exec_help = read_help("exec")
+    ok_resume, resume_help = read_help("exec", "resume")
+    ok_review, review_help = read_help("exec", "review")
+    supported = (
+        ok_exec
+        and ok_resume
+        and ok_review
+        and "--ignore-user-config" in exec_help
+        and "--strict-config" in exec_help
+        and "--ignore-user-config" in resume_help
+        and "--ignore-user-config" in review_help
+        and "[PROMPT]" in review_help
+    )
+    return DoctorCheck(
+        "Codex CLI contract",
+        supported,
+        "required isolation and review flags are supported"
+        if supported
+        else "Codex CLI lacks required isolation or review flags",
+    )
+
+
 def _check_github(token: str | None) -> DoctorCheck:
     """Verify a scoped service token without exposing account or token data."""
 
@@ -139,6 +183,7 @@ def run_doctor(*, env_path: Path) -> tuple[bool, tuple[DoctorCheck, ...]]:
     ):
         checks.append(_check_executable(path, label=label) if path else DoctorCheck(label, False, "absolute path is required"))
     if config.codex_bin:
+        checks.append(_check_codex_contract(config.codex_bin))
         checks.append(_check_login(config.codex_bin, label="Codex"))
     if config.claude_bin:
         checks.append(_check_login(config.claude_bin, label="Claude"))

@@ -210,6 +210,26 @@ class PipelineController:
         files as Hermes edits.
         """
 
+        changed = self.changed_paths(worktree=worktree)
+        violations = self.drafting_artifact_violations(changed)
+        if violations:
+            raise GateError(
+                "TASK baseline contains changes outside the PLAN/TASK Markdown directories"
+            )
+        return {
+            path: self._fingerprint_path(worktree=worktree, relative_path=path)
+            for path in changed
+        }
+
+    def snapshot_worktree_changes(self, *, worktree: Path) -> dict[str, str]:
+        """Fingerprint all existing dirty paths before one provider turn.
+
+        This snapshot is deliberately broader than the TASK baseline.  A retry
+        may begin with files left by a failed Hermes attempt; the provider may
+        discuss or revise PLAN/TASK documents, but it must not alter those
+        implementation files or move HEAD.
+        """
+
         return {
             path: self._fingerprint_path(worktree=worktree, relative_path=path)
             for path in self.changed_paths(worktree=worktree)
@@ -259,16 +279,64 @@ class PipelineController:
         visible to the owner.
         """
 
+        return self.drafting_artifact_violations(self.changed_paths(worktree=worktree))
+
+    def drafting_artifact_violations(self, paths: Sequence[str]) -> tuple[str, ...]:
+        """Return paths that a planning/specification turn may not write."""
+
         allowed_prefixes = (
             self.profile.plan_directory.as_posix() + "/",
             self.profile.task_directory.as_posix() + "/",
         )
-        changed = self.changed_paths(worktree=worktree)
         return tuple(
-            path
-            for path in changed
-            if not path.startswith(allowed_prefixes) and path != CLARIFICATION_FILENAME
+            sorted(
+                path
+                for path in paths
+                if not path.endswith(".md")
+                or not any(path.startswith(prefix) for prefix in allowed_prefixes)
+            )
         )
+
+    def verify_drafting_turn(
+        self,
+        *,
+        worktree: Path,
+        start_head_sha: str,
+        start_baseline: dict[str, str],
+    ) -> None:
+        """Fail a provider turn that commits or changes non-artifact files."""
+
+        current_head = self.worktree_head_sha(worktree=worktree)
+        if current_head.lower() != start_head_sha.lower():
+            raise GateError("drafting turn changed Git HEAD; implementation commits belong to Hermes")
+        changed = self._changes_since_task_baseline(
+            worktree=worktree,
+            baseline=start_baseline,
+        )
+        violations = self.drafting_artifact_violations(changed)
+        if violations:
+            raise GateError(
+                "drafting turn changed files outside the PLAN/TASK Markdown directories"
+            )
+
+    def verify_initial_drafting_boundary(
+        self,
+        *,
+        worktree: Path,
+        base_sha: str,
+    ) -> None:
+        """Recheck the initial drafting boundary at an owner approval gate."""
+
+        current_head = self.worktree_head_sha(worktree=worktree)
+        if current_head.lower() != base_sha.lower():
+            raise GateError("drafting changed Git HEAD before Hermes approval")
+        violations = self.drafting_artifact_violations(
+            self.changed_paths(worktree=worktree)
+        )
+        if violations:
+            raise GateError(
+                "drafting changed files outside the PLAN/TASK Markdown directories"
+            )
 
     def changes_since_baseline(
         self,

@@ -46,6 +46,12 @@ class CodexAdapter(ProviderAdapter):
         # expand the workspace-write/read-only sandbox boundary.
         return ["-c", 'approval_policy="never"']
 
+    @staticmethod
+    def _isolated_config() -> list[str]:
+        # Authentication is retained, but personal MCP servers, hooks, profiles,
+        # and config defaults must not expand a durable service turn.
+        return ["--ignore-user-config", "--strict-config"]
+
     def new_command(self, *, model: str, prompt: str, effort: str = "medium") -> list[str]:
         model = self.validate_model(model)
         effort = self.validate_effort(effort)
@@ -53,6 +59,7 @@ class CodexAdapter(ProviderAdapter):
             str(self.executable),
             "exec",
             "--json",
+            *self._isolated_config(),
             "--sandbox",
             "workspace-write",
             *self._noninteractive_approval_config(),
@@ -81,11 +88,13 @@ class CodexAdapter(ProviderAdapter):
             "exec",
             "resume",
             "--json",
+            *self._isolated_config(),
             # ``codex exec resume`` intentionally has no ``--sandbox`` flag.
             # It does accept generic TOML config overrides, so restate the
             # write boundary here instead of inheriting a user's possibly
-            # read-only default.  This keeps resumed implementation turns
-            # equivalent to a fresh ``exec --sandbox workspace-write`` turn.
+            # read-only default.  Ariadne's completion and approval gates then
+            # constrain both fresh and resumed drafting turns to PLAN/TASK
+            # Markdown artifacts.
             "-c",
             'sandbox_mode="workspace-write"',
             *self._noninteractive_approval_config(),
@@ -110,15 +119,11 @@ class CodexAdapter(ProviderAdapter):
         effort = self.validate_effort(effort)
         if not base_ref.strip():
             raise AdapterError("Codex review requires a base ref")
-        # Codex CLI permits exactly one review target: ``--base``, ``--commit``,
-        # ``--uncommitted``, or a custom prompt.  Ariadne needs the durable
-        # base-ref target, so retain the stored request as owner/audit context
-        # but do not pass it as a conflicting positional prompt.
-        del prompt
-        # ``codex exec resume`` does not accept a sandbox override.  Reviews
-        # deliberately use the dedicated review command instead, with its
-        # disk-read-only sandbox policy, so they cannot turn into a second
-        # implementation pass or mutate the resumable implementation session.
+        if not prompt.strip():
+            raise AdapterError("Codex review requires review instructions")
+        # A review target and custom review instructions are independent in the
+        # supported CLI contract.  Keep the dedicated target while forwarding
+        # Ariadne's structured owner-facing review request.
         return [
             str(self.executable),
             "exec",
@@ -126,13 +131,17 @@ class CodexAdapter(ProviderAdapter):
             "--base",
             base_ref,
             "--json",
+            *self._isolated_config(),
             *self._noninteractive_approval_config(),
             "-c",
             f'model_reasoning_effort="{effort}"',
             "-c",
+            'sandbox_mode="read-only"',
+            "-c",
             'sandbox_permissions=["disk-full-read-access"]',
             "-m",
             model,
+            prompt,
         ]
 
     def parse_line(self, line: str) -> list[AdapterEvent]:
