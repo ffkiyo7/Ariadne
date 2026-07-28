@@ -21,6 +21,8 @@ class AdapterCommandTests(unittest.TestCase):
                 "/home/ubuntu/.local/bin/codex",
                 "exec",
                 "--json",
+                "--ignore-user-config",
+                "--strict-config",
                 "--sandbox",
                 "workspace-write",
                 "-c",
@@ -33,24 +35,16 @@ class AdapterCommandTests(unittest.TestCase):
             ],
         )
         resumed = adapter.resume_command(model="b", provider_session_id="thread-1", prompt="next")
-        self.assertEqual(
-            resumed[:13],
-            [
-                "/home/ubuntu/.local/bin/codex",
-                "exec",
-                "resume",
-                "--json",
-                "-c",
-                'sandbox_mode="workspace-write"',
-                "-c",
-                'approval_policy="never"',
-                "-c",
-                'model_reasoning_effort="medium"',
-                "-m",
-                "b",
-                "thread-1",
-            ],
-        )
+        self.assertEqual(resumed[:6], [
+            "/home/ubuntu/.local/bin/codex",
+            "exec",
+            "resume",
+            "--json",
+            "--ignore-user-config",
+            "--strict-config",
+        ])
+        self.assertIn('sandbox_mode="workspace-write"', resumed)
+        self.assertEqual(resumed[-2:], ["thread-1", "next"])
         self.assertNotIn("--ephemeral", resumed)
         self.assertIn('model_reasoning_effort="medium"', resumed)
         self.assertIn('approval_policy="never"', resumed)
@@ -68,9 +62,12 @@ class AdapterCommandTests(unittest.TestCase):
             "--json",
         ])
         self.assertIn('sandbox_permissions=["disk-full-read-access"]', review)
+        self.assertIn('sandbox_mode="read-only"', review)
+        self.assertIn("--ignore-user-config", review)
+        self.assertIn("--strict-config", review)
         self.assertIn('approval_policy="never"', review)
         self.assertNotIn("resume", review)
-        self.assertNotIn("review this", review)
+        self.assertEqual(review[-1], "review this")
         with self.assertRaises(AdapterError):
             adapter.new_command(model="not-allowed", prompt="hello")
         with self.assertRaises(AdapterError):

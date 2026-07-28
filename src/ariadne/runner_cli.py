@@ -210,6 +210,24 @@ def run_recorded_turn(*, turn_id: str, env_path: Path) -> dict:
                 turn=turn,
                 redactor=redactor,
             )
+        pipeline_controller = PipelineController(
+            state=state,
+            redactor=redactor,
+            profile=config.profile,
+        )
+        draft_start_head: str | None = None
+        draft_start_baseline: dict[str, str] | None = None
+        draft_initial_base_sha: str | None = None
+        if turn.execution_kind is TurnKind.PROVIDER:
+            draft_start_head = pipeline_controller.worktree_head_sha(
+                worktree=harness_session.worktree
+            )
+            draft_start_baseline = pipeline_controller.snapshot_worktree_changes(
+                worktree=harness_session.worktree
+            )
+            pipeline = state.get_pipeline_run(harness_session.id)
+            if pipeline.task_turn_id is None:
+                draft_initial_base_sha = pipeline.base_sha
         if not turn.input_path or not turn.input_path.is_file():
             raise RuntimeError("turn input pack is missing")
         prompt = turn.input_path.read_text(encoding="utf-8")
@@ -330,11 +348,39 @@ def run_recorded_turn(*, turn_id: str, env_path: Path) -> dict:
                 controller.record_event(turn.id, event)
 
         runner = TurnRunner(state=state, layout=layout, redactor=redactor)
+
+        def validate_provider_completion() -> str | None:
+            if turn.execution_kind is not TurnKind.PROVIDER:
+                return None
+            assert draft_start_head is not None
+            assert draft_start_baseline is not None
+            try:
+                if draft_initial_base_sha:
+                    # Before the first Hermes handoff, validate the complete
+                    # worktree against the recorded session base.  A retry may
+                    # therefore repair an earlier failed drafting turn, while
+                    # still being unable to carry code or commits across the
+                    # approval boundary.
+                    pipeline_controller.verify_initial_drafting_boundary(
+                        worktree=harness_session.worktree,
+                        base_sha=draft_initial_base_sha,
+                    )
+                else:
+                    pipeline_controller.verify_drafting_turn(
+                        worktree=harness_session.worktree,
+                        start_head_sha=draft_start_head,
+                        start_baseline=draft_start_baseline,
+                    )
+            except GateError as exc:
+                return str(exc)
+            return None
+
         return runner.run(
             turn.id,
             argv,
             cwd=harness_session.worktree,
             line_handler=handle_line,
+            completion_validator=validate_provider_completion,
         )
 
 

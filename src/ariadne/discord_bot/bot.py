@@ -435,7 +435,7 @@ class DiscordHarnessService:
             try:
                 drift = self.pipeline.draft_scope_drift(worktree=session.worktree)
             except GateError:
-                drift = ()
+                return (("❌ 起草边界检查失败", "无法核验 worktree；批准操作将被阻断"),)
             self._candidate_cache[key] = (now, drift)
             cached = self._candidate_cache[key]
         drift = cached[1]
@@ -598,6 +598,12 @@ class DiscordHarnessService:
             pipeline = self.state.get_pipeline_run(session_id)
         except NotFoundError as exc:
             raise GateError("session has no pipeline record") from exc
+        if not pipeline.base_sha:
+            raise GateError("session has no recorded drafting base SHA")
+        self.pipeline.verify_initial_drafting_boundary(
+            worktree=session.worktree,
+            base_sha=pipeline.base_sha,
+        )
         plan_path = pipeline.plan_path
         if plan_path is None:
             plan_root = self.config.profile.plan_root(session.worktree)
@@ -650,6 +656,13 @@ class DiscordHarnessService:
         pipeline = self.state.get_pipeline_run(session_id)
         if not pipeline.plan_path or not pipeline.plan_hash:
             raise GateError("TASK requires a recorded approved PLAN")
+        if pipeline.task_turn_id is None:
+            if not pipeline.base_sha:
+                raise GateError("session has no recorded drafting base SHA")
+            self.pipeline.verify_initial_drafting_boundary(
+                worktree=session.worktree,
+                base_sha=pipeline.base_sha,
+            )
         try:
             current_plan_hash = hashlib.sha256(pipeline.plan_path.read_bytes()).hexdigest()
         except OSError as exc:
