@@ -318,6 +318,88 @@ python3 -c "print('ok')"
         pipeline = self.state.get_pipeline_run(start.session_id)
         self.assertEqual(pipeline.task_turn_id, turn.id)
 
+    def _start_plan_approved_session(self, source_message_id: str) -> str:
+        start = self.service.start_from_source(
+            source_message_id=source_message_id,
+            source_content="Start",
+            provider_name="codex",
+        )
+        worktree = self.worktrees.root / start.session_id
+        plan = worktree / "docs" / "plans" / "PLAN-safe.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# PLAN\n\nSafe docs-only change.\n", encoding="utf-8")
+        initial = self.state.list_turns(start.session_id)[0]
+        self.state.claim_next()
+        self.state.finalize_turn(initial.id, state=TurnState.SUCCEEDED, exit_code=0)
+        self.service.handle_control(
+            session_id=start.session_id, command=parse_control("!approve PLAN-safe")
+        )
+        return start.session_id
+
+    def test_no_task_is_approvable_between_plan_approval_and_the_drafted_task(self):
+        session_id = self._start_plan_approved_session("source-task-gap")
+        worktree = self.worktrees.root / session_id
+        self.assertEqual(self.service.task_approval_candidates(session_id), ())
+        self.assertFalse(self.service.task_directory_has_markdown(session_id))
+
+        task = worktree / "docs" / "tasks" / "TASK-safe.md"
+        task.parent.mkdir(parents=True)
+        task.write_text("# 目标\n更新文档。\n", encoding="utf-8")
+        # Candidate detection is cached for a few seconds; a test writing the
+        # TASK immediately after asking would otherwise read the stale answer.
+        self.service._candidate_cache.clear()
+
+        self.assertEqual(self.service.task_approval_candidates(session_id), ("TASK-safe",))
+        self.assertTrue(self.service.task_directory_has_markdown(session_id))
+
+    def test_committed_task_stays_approvable_for_a_retry(self):
+        session_id = self._start_plan_approved_session("source-task-committed")
+        worktree = self.worktrees.root / session_id
+        task = worktree / "docs" / "tasks" / "TASK-safe.md"
+        task.parent.mkdir(parents=True)
+        task.write_text("# 目标\n更新文档。\n", encoding="utf-8")
+        self.state.update_pipeline_run(session_id, task_path=task)
+        subprocess.run(
+            ["git", "-C", str(worktree), "add", "docs"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git", "-C", str(worktree), "-c", "user.name=Ariadne Test",
+                "-c", "user.email=ariadne@example.invalid", "commit", "-m", "task",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.service._candidate_cache.clear()
+
+        # The TASK is no longer a working-tree change, so only the recorded
+        # path keeps the NEEDS_OWNER retry reachable from the status card.
+        self.assertEqual(self.service.detect_task_candidates(session_id), ())
+        self.assertEqual(self.service.task_approval_candidates(session_id), ("TASK-safe",))
+
+    @unittest.skipIf(discord_bot.commands is None, "discord.py is not installed")
+    def test_task_actions_track_whether_a_task_exists(self):
+        session_id = self._start_plan_approved_session("source-task-view")
+        worktree = self.worktrees.root / session_id
+        bot = SimpleNamespace(service=self.service)
+
+        empty = discord_bot.PipelineActionView(bot=bot, session_id=session_id)
+        self.assertEqual([item.custom_id for item in empty.children], [])
+
+        task = worktree / "docs" / "tasks" / "TASK-safe.md"
+        task.parent.mkdir(parents=True)
+        task.write_text("# 目标\n更新文档。\n", encoding="utf-8")
+        self.service._candidate_cache.clear()
+
+        drafted = discord_bot.PipelineActionView(bot=bot, session_id=session_id)
+        self.assertEqual(
+            [item.custom_id.rsplit(":", 1)[-1] for item in drafted.children], ["task-direct"]
+        )
+
     def test_failed_review_can_retry_without_reexecuting_hermes(self):
         start = self.service.start_from_source(
             source_message_id="source-review-retry",
@@ -373,6 +455,123 @@ test -f README.md
             [turn.execution_kind for turn in self.state.list_turns(start.session_id)].count(TurnKind.HERMES),
             1,
         )
+
+    def test_owner_message_is_clarification_and_only_a_button_advances_the_plan(self):
+        start = self.service.start_from_source(
+            source_message_id="source-plan-gate",
+            source_content="Add a daily-pick feature.",
+            provider_name="claude",
+        )
+        session_id = start.session_id
+        worktree = self.worktrees.root / session_id
+        # Drive the initial drafting turn to completion -> waiting_for_owner.
+        initial = self.state.list_turns(session_id)[0]
+        self.state.claim_next()
+        self.state.finalize_turn(initial.id, state=TurnState.SUCCEEDED, exit_code=0)
+        self.assertEqual(self.state.get_session(session_id).status, SessionStatus.WAITING_FOR_OWNER)
+
+        # No PLAN file yet: nothing is approvable and the card says so.
+        self.assertEqual(self.service.detect_plan_candidates(session_id), ())
+        card = self.service.status_card(session_id)
+        card_text = "\n".join(f"{k}:{v}" for k, v in card.fields)
+        self.assertIn("未检测到新 PLAN", card_text)
+
+        # An owner chat message must NOT advance the phase; it enqueues a
+        # drafting/clarification turn and the session stays waiting_for_owner.
+        turn = self.service.enqueue_owner_message(
+            session_id=session_id,
+            owner_message_id="owner-clarify-1",
+            content="批准，进入实现吧",
+        )
+        # The message queues a drafting turn (QUEUED) but never crosses into an
+        # approval phase; a conversational "批准" is not a gate.
+        self.assertEqual(self.state.get_session(session_id).status, SessionStatus.QUEUED)
+        prompt = turn.input_path.read_text(encoding="utf-8")
+        self.assertIn("clarification", prompt.lower())
+        self.assertIn("NOT an approval", prompt)
+        self.state.claim_next()
+        self.state.finalize_turn(turn.id, state=TurnState.SUCCEEDED, exit_code=0)
+        self.assertEqual(self.state.get_session(session_id).status, SessionStatus.WAITING_FOR_OWNER)
+
+        # The drafting turn produces a PLAN file: now it is an approval candidate.
+        plan_dir = worktree / "docs" / "plans"
+        plan_dir.mkdir(parents=True)
+        (plan_dir / "PLAN-daily-pick.md").write_text("# PLAN\n\nDaily pick.\n", encoding="utf-8")
+        # A forced status refresh (which fires on turn finalization) invalidates
+        # the short detection cache; mirror that here.
+        self.service.invalidate_candidates(session_id)
+        candidates = self.service.detect_plan_candidates(session_id)
+        self.assertEqual([Path(p).stem for p in candidates], ["PLAN-daily-pick"])
+
+        # The explicit button action is the only thing that advances the phase.
+        approved = self.service.approve_plan(session_id=session_id, plan_selector="PLAN-daily-pick")
+        self.assertEqual(approved, "PLAN-daily-pick.md")
+        self.assertEqual(self.state.get_session(session_id).status, SessionStatus.PLAN_APPROVED)
+
+    def test_review_pending_can_be_returned_for_revision_and_feeds_the_next_round(self):
+        start = self.service.start_from_source(
+            source_message_id="source-revise",
+            source_content="Start",
+            provider_name="codex",
+        )
+        worktree = self.worktrees.root / start.session_id
+        plan = worktree / "docs" / "plans" / "PLAN-revise.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# PLAN\n\nSafe docs-only change.\n", encoding="utf-8")
+        initial = self.state.list_turns(start.session_id)[0]
+        self.state.claim_next()
+        self.state.finalize_turn(initial.id, state=TurnState.SUCCEEDED, exit_code=0)
+        self.service.handle_control(session_id=start.session_id, command=parse_control("!approve PLAN-revise"))
+        task = worktree / "docs" / "tasks" / "TASK-revise.md"
+        task.parent.mkdir(parents=True)
+        task.write_text(
+            """# Objective
+Update the documentation.
+
+# Allowed files
+- `README.md`
+
+# Forbidden zones
+Do not push or merge.
+
+# Interfaces
+None.
+
+# Definition of done
+The README is updated.
+
+# Verification commands
+```text
+test -f README.md
+```
+""",
+            encoding="utf-8",
+        )
+        self.service.handle_control(session_id=start.session_id, command=parse_control("!task TASK-revise"))
+        hermes = self.state.list_turns(start.session_id)[-1]
+        self.state.claim_next()
+        self.state.finalize_turn(hermes.id, state=TurnState.SUCCEEDED, exit_code=0)
+        review = self.service.request_review(session_id=start.session_id)
+        # The structured review contract is part of the request pack.
+        request_text = review.input_path.read_text(encoding="utf-8")
+        for heading in ("## 结论", "## 改动核对", "## TASK 充分性"):
+            self.assertIn(heading, request_text)
+        self.state.claim_next()
+        self.state.finalize_turn(review.id, state=TurnState.SUCCEEDED, exit_code=0)
+
+        with self.assertRaises(discord_bot.GateError):
+            self.service.return_for_revision(session_id=start.session_id, feedback="   ")
+        self.service.return_for_revision(
+            session_id=start.session_id, feedback="review 指出边界条件遗漏，请改用查表实现"
+        )
+        self.assertEqual(self.state.get_session(start.session_id).status, SessionStatus.NEEDS_OWNER)
+        # Re-approval is possible again, and the feedback reaches the next round.
+        self.service.handle_control(session_id=start.session_id, command=parse_control("!task TASK-revise"))
+        from ariadne.retry_context import build_retry_context
+
+        context = build_retry_context(self.state, harness_session_id=start.session_id)
+        assert context is not None
+        self.assertIn("查表实现", context)
 
     def test_owner_message_enqueues_one_turn_after_configuration_is_fixed(self):
         start = self.service.start_from_source(

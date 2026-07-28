@@ -11,3 +11,6 @@ plan_directory = "docs/plans"
 task_directory = "docs/tasks"
 protected_sibling_checkouts = ["LuxrayKit-maintenance"]
 preview_required = true
+# Shared worker journal: silently added to every TASK allowlist so Hermes can
+# append reviewed findings.  AGENTS.md stays owner-curated and is not writable.
+knowledge_file = "docs/dev-knowledge.md"

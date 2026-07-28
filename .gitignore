@@ -10,3 +10,8 @@ dist/
 # deliberately outside this repository.  Keep accidental local variants out.
 .ariadne/
 env
+
+# Local credentials: SSH keys, bot tokens, host addresses.  Never commit.
+aws/
+*.pem
+*:Zone.Identifier

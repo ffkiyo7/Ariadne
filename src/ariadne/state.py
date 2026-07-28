@@ -12,6 +12,8 @@ from typing import Iterator, Sequence
 
 from .filesystem import ensure_private_dir
 from .models import (
+    AuditFact,
+    Clarification,
     Dispatch,
     DispatchStatus,
     HarnessSession,
@@ -46,7 +48,7 @@ class QueueError(StateError):
     pass
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _SESSION_TRANSITIONS: dict[SessionStatus, set[SessionStatus]] = {
     SessionStatus.DRAFT: {SessionStatus.QUEUED, SessionStatus.CANCELLED},
@@ -233,6 +235,34 @@ class StateStore:
                         "ALTER TABLE pipeline_runs ADD COLUMN task_start_head_sha TEXT"
                     )
                     current = 9
+                if current < 10:
+                    self._connection.executescript(
+                        """
+                        CREATE TABLE IF NOT EXISTS clarifications (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            harness_session_id TEXT NOT NULL REFERENCES harness_sessions(id),
+                            turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id),
+                            blocker TEXT NOT NULL,
+                            insufficiency TEXT NOT NULL,
+                            options TEXT NOT NULL,
+                            recommendation TEXT NOT NULL,
+                            impact TEXT NOT NULL,
+                            posted_message_id TEXT,
+                            created_at TEXT NOT NULL
+                        );
+                        CREATE INDEX IF NOT EXISTS idx_clarifications_session
+                            ON clarifications(harness_session_id, id);
+                        CREATE TABLE IF NOT EXISTS posted_cards (
+                            kind TEXT NOT NULL,
+                            turn_id TEXT NOT NULL REFERENCES turns(id),
+                            harness_session_id TEXT NOT NULL REFERENCES harness_sessions(id),
+                            message_id TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            PRIMARY KEY (kind, turn_id)
+                        );
+                        """
+                    )
+                    current = 10
                 self._connection.execute(f"PRAGMA user_version={current}")
                 self._connection.commit()
             except Exception:
@@ -1910,6 +1940,156 @@ class StateStore:
                 ),
             )
             return int(cursor.lastrowid)
+
+    @staticmethod
+    def _clarification_from_row(row: sqlite3.Row) -> Clarification:
+        return Clarification(
+            id=int(row["id"]),
+            harness_session_id=row["harness_session_id"],
+            turn_id=row["turn_id"],
+            blocker=row["blocker"],
+            insufficiency=row["insufficiency"],
+            options=row["options"],
+            recommendation=row["recommendation"],
+            impact=row["impact"],
+            posted_message_id=row["posted_message_id"],
+            created_at=row["created_at"],
+        )
+
+    def record_clarification(
+        self,
+        *,
+        harness_session_id: str,
+        turn_id: str,
+        blocker: str,
+        insufficiency: str,
+        options: str,
+        recommendation: str,
+        impact: str,
+    ) -> Clarification:
+        values = {
+            "blocker": blocker,
+            "insufficiency": insufficiency,
+            "options": options,
+            "recommendation": recommendation,
+            "impact": impact,
+        }
+        if any(not str(value).strip() for value in values.values()):
+            raise StateError("clarification sections must be non-empty")
+        with self._transaction(immediate=True) as conn:
+            self._require_session(conn, harness_session_id)
+            self._require_turn(conn, turn_id)
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO clarifications
+                    (harness_session_id, turn_id, blocker, insufficiency, options,
+                     recommendation, impact, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        harness_session_id,
+                        turn_id,
+                        *(str(values[key])[:4000] for key in ("blocker", "insufficiency", "options", "recommendation", "impact")),
+                        _utc_now(),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StateError("turn already has a recorded clarification") from exc
+            row = conn.execute(
+                "SELECT * FROM clarifications WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        assert row is not None
+        return self._clarification_from_row(row)
+
+    def latest_clarification(self, harness_session_id: str) -> Clarification | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM clarifications WHERE harness_session_id = ? ORDER BY id DESC LIMIT 1",
+                (harness_session_id,),
+            ).fetchone()
+        return self._clarification_from_row(row) if row else None
+
+    def list_unposted_clarifications(self) -> list[Clarification]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM clarifications WHERE posted_message_id IS NULL ORDER BY id"
+            ).fetchall()
+        return [self._clarification_from_row(row) for row in rows]
+
+    def mark_clarification_posted(self, clarification_id: int, message_id: str) -> None:
+        message_id = str(message_id).strip()
+        if not message_id:
+            raise StateError("clarification message id is required")
+        with self._transaction(immediate=True) as conn:
+            updated = conn.execute(
+                "UPDATE clarifications SET posted_message_id = ? WHERE id = ? AND posted_message_id IS NULL",
+                (message_id, clarification_id),
+            ).rowcount
+            if updated != 1:
+                raise StateError("clarification is missing or already posted")
+
+    def record_posted_card(self, *, kind: str, turn_id: str, harness_session_id: str, message_id: str) -> None:
+        if not kind.strip() or not str(message_id).strip():
+            raise StateError("posted card kind and message id are required")
+        with self._transaction(immediate=True) as conn:
+            self._require_session(conn, harness_session_id)
+            self._require_turn(conn, turn_id)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO posted_cards (kind, turn_id, harness_session_id, message_id, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (kind.strip(), turn_id, harness_session_id, str(message_id).strip(), _utc_now()),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StateError("card is already recorded for this turn") from exc
+
+    def find_posted_card(self, *, kind: str, turn_id: str) -> str | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT message_id FROM posted_cards WHERE kind = ? AND turn_id = ?",
+                (kind, turn_id),
+            ).fetchone()
+        return row["message_id"] if row else None
+
+    def list_posted_cards(self, *, kind: str) -> list[tuple[str, str, str]]:
+        """Return (turn_id, harness_session_id, message_id) for one card kind."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT turn_id, harness_session_id, message_id FROM posted_cards WHERE kind = ? ORDER BY created_at",
+                (kind,),
+            ).fetchall()
+        return [(row["turn_id"], row["harness_session_id"], row["message_id"]) for row in rows]
+
+    def list_session_audits(
+        self,
+        harness_session_id: str,
+        actions: Sequence[str],
+    ) -> list[AuditFact]:
+        if not actions:
+            return []
+        placeholders = ", ".join("?" for _ in actions)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT id, action, details_json, created_at FROM audit_events
+                WHERE harness_session_id = ? AND action IN ({placeholders})
+                ORDER BY id
+                """,
+                (harness_session_id, *actions),
+            ).fetchall()
+        return [
+            AuditFact(
+                id=int(row["id"]),
+                action=row["action"],
+                details_json=row["details_json"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
 
     @staticmethod
     def _require_session(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row:

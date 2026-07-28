@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from ..clarification import CLARIFICATION_FILENAME
 from ..github import ChecksFacts, GitHubClient, GitHubError, PullRequestFacts
 from ..models import SessionStatus
 from ..preview import PreviewHealthChecker
@@ -87,6 +89,22 @@ class PipelineController:
                 base_sha=base_sha,
             )
 
+    def scoped_task(self, task: TaskSpec) -> TaskSpec:
+        """Extend a TASK allowlist with the profile's shared knowledge file.
+
+        The knowledge file is team memory: a worker may append findings in
+        the same reviewed commit without the TASK author having to remember
+        to allow it.  Every other scope rule stays exactly as authored.
+        """
+
+        knowledge = self.profile.knowledge_file
+        if knowledge is None:
+            return task
+        value = knowledge.as_posix()
+        if task.allows_path(value):
+            return task
+        return dataclasses.replace(task, allowed_files=task.allowed_files + (value,))
+
     def validate_task(self, *, session_id: str, task_path: Path) -> TaskSpec:
         session = self.state.get_session(session_id)
         task_path = Path(task_path).resolve()
@@ -97,7 +115,7 @@ class PipelineController:
         try:
             task = parse_task(task_path)
             task.validate_hermes_contract()
-            return task
+            return self.scoped_task(task)
         except InvalidTask as exc:
             raise GateError(str(exc)) from exc
 
@@ -231,6 +249,38 @@ class PipelineController:
             )
         )
 
+    def draft_scope_drift(self, *, worktree: Path) -> tuple[str, ...]:
+        """Worktree changes a drafting turn should not have made.
+
+        During the drafting phase the only legitimate writes are Markdown
+        under the profile's plan/task directories.  Codex drafting turns keep
+        a workspace-write sandbox (it has no path-scoped write mode), so this
+        deterministic check is the backstop that makes silent implementation
+        visible to the owner.
+        """
+
+        allowed_prefixes = (
+            self.profile.plan_directory.as_posix() + "/",
+            self.profile.task_directory.as_posix() + "/",
+        )
+        changed = self.changed_paths(worktree=worktree)
+        return tuple(
+            path
+            for path in changed
+            if not path.startswith(allowed_prefixes) and path != CLARIFICATION_FILENAME
+        )
+
+    def changes_since_baseline(
+        self,
+        *,
+        worktree: Path,
+        task_baseline_json: str,
+    ) -> tuple[str, ...]:
+        """Public view of baseline drift, used by the clarification gate."""
+
+        baseline = self._parse_task_baseline(task_baseline_json)
+        return self._changes_since_task_baseline(worktree=worktree, baseline=baseline)
+
     def verify_reviewed_worktree_clean(self, *, session_id: str) -> None:
         """Permit only unchanged pre-Hermes PLAN/TASK files before a Draft PR.
 
@@ -351,7 +401,12 @@ class PipelineController:
             "dirty_paths": dirty_changes,
             "changed_paths": changed,
             "verification": [
-                {"command": list(result.command), "passed": result.passed}
+                {
+                    "command": list(result.command),
+                    "passed": result.passed,
+                    # Failed output is retry-loop evidence; passed output is noise.
+                    **({} if result.passed else {"summary": result.summary[:600]}),
+                }
                 for result in results
             ],
         }

@@ -15,6 +15,31 @@ class StatusCard:
     fields: tuple[tuple[str, str], ...]
 
 
+def chunk_message(text: str, limit: int = 1900) -> list[str]:
+    """Split long text on line boundaries instead of hard character cuts.
+
+    A hard cut at position N breaks sentences mid-word and produces the
+    "full-width then broken" rendering in Discord.  Prefer the last newline
+    before the limit; fall back to a hard cut only for a single line longer
+    than the limit.
+    """
+
+    if limit < 1:
+        raise ValueError("chunk limit must be positive")
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        cut = remaining.rfind("\n", 0, limit + 1)
+        if cut <= 0:
+            cut = limit
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    return [chunk for chunk in chunks if chunk.strip()]
+
+
 def build_status_card(
     *,
     session: HarnessSession,
@@ -23,6 +48,7 @@ def build_status_card(
     queue_position: int | None,
     error_summary: str | None = None,
     redactor: Redactor | None = None,
+    links: tuple[tuple[str, str], ...] = (),
 ) -> StatusCard:
     redactor = redactor or Redactor()
     provider_name = provider.provider.value if provider else "not-started"
@@ -55,6 +81,10 @@ def build_status_card(
     }.get(state, "按状态卡和 owner 门禁继续。")
     if provider and not provider.configuration_locked and turn is None:
         next_step = "请使用此置顶卡选择并固定配置；固定前不会创建或运行模型 turn。"
+    # Jump links keep the owner's attention anchored: the pinned card always
+    # points at the newest decision-relevant message instead of forcing a
+    # scroll through the thread history.
+    link_fields = tuple((name, url) for name, url in links if name and url)
     return StatusCard(
         title=f"{session.id} · {provider_name}",
         description=redactor.redact(next_step)[:1000],
@@ -72,7 +102,8 @@ def build_status_card(
             ("executor", executor),
             ("status", state),
             ("last safe error", safe_error),
-        ),
+        )
+        + link_fields,
     )
 
 

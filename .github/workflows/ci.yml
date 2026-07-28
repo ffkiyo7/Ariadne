@@ -1,0 +1,64 @@
+name: CI
+
+# main is protected and takes pull requests only, so a branch is always tested
+# through its pull request.  Listening for both events on every branch would
+# just run the suite twice for the same commit.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # discord.py is only a runtime dependency, but installing it is what makes
+      # the Discord view tests run instead of skipping.
+      - name: Install
+        run: python -m pip install --quiet .
+      - name: Test
+        run: PYTHONPATH=src python -m unittest discover -s tests -p 'test_*.py' -t tests
+
+  deploy:
+    # Never on a pull request, and never from a branch: a public repository must
+    # not expose the deploy credential to code that has not reached main.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: ariadne-vps-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Prepare the deploy credential
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/ariadne_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/ariadne_deploy ~/.ssh/known_hosts
+
+      # The key is restricted to a forced command on the VPS, so the commit is
+      # the only thing this step can ask for.  The endpoint verifies that the
+      # commit is reachable from the deploy branch, installs it, runs the tests
+      # and doctor, restarts, waits for the Discord gateway, and reinstalls the
+      # previous commit if any of that fails.
+      - name: Deploy to the VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          ssh -i ~/.ssh/ariadne_deploy \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              -o StrictHostKeyChecking=yes \
+              "$VPS_HOST" "$TARGET_SHA"

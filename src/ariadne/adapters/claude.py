@@ -10,20 +10,39 @@ from ..models import Provider
 from .base import AdapterEvent, AdapterError, ProviderAdapter, _model, _safe_text, _session_id
 
 
+# Provider turns are drafting/consultation turns: they may read anything but
+# never edit application code.  Implementation authority belongs exclusively
+# to the owner-gated Hermes turn.  The S-0007 incident proved that a prompt
+# sentence is not a phase boundary; the tool allowlist is.
 DEFAULT_ALLOWED_TOOLS = (
     "Read",
-    "Edit",
-    "Write",
+    "Glob",
+    "Grep",
     "Bash(git status)",
     "Bash(git diff *)",
-    "Bash(npm test)",
-    "Bash(npm run build)",
+    "Bash(git log *)",
+    "Bash(git show *)",
+    "Bash(git rev-parse *)",
+    "Bash(git ls-files *)",
 )
 
-# The implementation adapter intentionally has editing authority.  A review
-# turn is a different contract: it may inspect Git facts, but it must never
-# have Claude's Edit or Write tools.  Keep this list small and literal rather
-# than trying to validate arbitrary Bash passed by a model.
+
+def draft_allowed_tools(plan_directory: str, task_directory: str) -> tuple[str, ...]:
+    """Read-only core plus write access scoped to the PLAN/TASK directories."""
+
+    plan = plan_directory.strip("/")
+    task = task_directory.strip("/")
+    return DEFAULT_ALLOWED_TOOLS + (
+        f"Edit({plan}/**)",
+        f"Write({plan}/**)",
+        f"Edit({task}/**)",
+        f"Write({task}/**)",
+    )
+
+
+# A review turn is a stricter contract still: it may inspect Git facts, but it
+# must never have Claude's Edit or Write tools.  Keep this list small and
+# literal rather than trying to validate arbitrary Bash passed by a model.
 REVIEW_ALLOWED_TOOLS = (
     "Read",
     "Bash(git status)",
@@ -174,20 +193,10 @@ class ClaudeAdapter(ProviderAdapter):
         events: list[AdapterEvent] = []
         stream_event = payload.get("event") if isinstance(payload.get("event"), dict) else None
         if stream_event is not None:
-            delta = stream_event.get("delta")
-            if isinstance(delta, dict) and delta.get("type") in {"text_delta", "text"}:
-                text = _safe_text(delta.get("text"), self.redactor)
-                if text:
-                    events.append(
-                        AdapterEvent(
-                            kind="assistant_message",
-                            provider=self.provider,
-                            raw_type=str(stream_event.get("type") or raw_type),
-                            session_id=session_id,
-                            text=text,
-                            reported_model=reported_model,
-                        )
-                    )
+            # Text deltas are deliberately not emitted as assistant messages:
+            # posting fragments produces broken mid-sentence line breaks and
+            # duplicates the complete assistant message that follows.  The raw
+            # transcript still retains every partial line.
             content_block = stream_event.get("content_block")
             if isinstance(content_block, dict) and content_block.get("type") in {"tool_use", "tool_call"}:
                 events.append(

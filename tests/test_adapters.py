@@ -163,10 +163,14 @@ class AdapterParsingTests(unittest.TestCase):
             '{"type":"assistant","session_id":"cl-1","message":{"content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"hello"},{"type":"tool_use","name":"Read"}]}}'
         )
         self.assertEqual([event.kind for event in events], ["assistant_message", "tool_started"])
+        # Partial text deltas are intentionally not surfaced as assistant
+        # messages: posting fragments produced broken mid-sentence lines and
+        # duplicated the complete message that follows.  The full text arrives
+        # via the non-stream assistant content block above.
         partial = adapter.parse_line(
             '{"type":"stream_event","session_id":"cl-1","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"part"}}}'
         )
-        self.assertEqual(partial[0].text, "part")
+        self.assertNotEqual(partial[0].kind, "assistant_message")
         self.assertEqual(adapter.parse_line('{"type":"result","subtype":"success","session_id":"cl-1"}')[0].kind, "turn_finished")
 
 

@@ -38,6 +38,19 @@ def _relative_directory(section: Mapping[str, Any], key: str, *, default: str) -
     return Path(*path.parts)
 
 
+def _relative_markdown_file(section: Mapping[str, Any], key: str) -> Path | None:
+    value = section.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ProfileError(f"profile field must be a non-empty string: {key}")
+    normalized = value.strip().replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or ".." in path.parts or path.suffix != ".md":
+        raise ProfileError(f"profile field must be a safe relative Markdown path: {key}")
+    return Path(*path.parts)
+
+
 def _sibling_names(section: Mapping[str, Any]) -> tuple[str, ...]:
     value = section.get("protected_sibling_checkouts", [])
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
@@ -62,6 +75,11 @@ class ProjectProfile:
     task_directory: Path
     protected_sibling_checkouts: tuple[str, ...] = ()
     preview_required: bool = True
+    # Optional in-repo shared knowledge file.  When set, it is silently added
+    # to every TASK allowlist so a worker can append durable project findings
+    # in the same reviewed commit.  AGENTS.md stays owner-curated and is
+    # deliberately NOT writable through this mechanism.
+    knowledge_file: Path | None = None
 
     @classmethod
     def default(cls) -> "ProjectProfile":
@@ -142,4 +160,5 @@ def load_profile(path: Path) -> ProjectProfile:
         task_directory=_relative_directory(workflow, "task_directory", default="docs/tasks"),
         protected_sibling_checkouts=_sibling_names(workflow),
         preview_required=preview_required,
+        knowledge_file=_relative_markdown_file(workflow, "knowledge_file"),
     )

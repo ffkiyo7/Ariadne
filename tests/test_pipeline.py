@@ -108,6 +108,52 @@ test -f README.md
             with self.assertRaises(InvalidTask):
                 parse_task(path)
 
+    def test_task_accepts_glossed_numbered_and_emphasised_headings(self):
+        """The contract is stated in English while TASK bodies are Chinese.
+
+        Real drafts therefore gloss, number, and bold the headings; rejecting
+        them as "missing required sections" stalled the whole pipeline.
+        """
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            path = Path(directory) / "TASK.md"
+            path.write_text(
+                "# TASK：横幅\n\n"
+                "## objective（目标）\n实现横幅。\n\n"
+                "## allowed files（只允许改动/新增这些）\n"
+                "- 新增 `src/data/trivia.ts`——`TriviaFact` / `TriviaCategory` 类型、静态数组。\n"
+                "- 改 `src/pages/EnvironmentPage.tsx`——仅在 `view === 'overview'` 顶部挂载。\n\n"
+                "## 2. forbidden zones（禁区）\n禁止 push、禁止 merge。\n\n"
+                "## **Interfaces / 接口**\n保持函数签名。\n\n"
+                "## definition of done（完成定义）\n测试通过。\n\n"
+                "## verification commands（验证命令）\n```bash\nnpm test\n```\n",
+                encoding="utf-8",
+            )
+            task = parse_task(path)
+            task.validate_hermes_contract()
+            self.assertEqual(
+                task.allowed_files, ("src/data/trivia.ts", "src/pages/EnvironmentPage.tsx")
+            )
+            self.assertEqual(task.verification_commands, ("npm test",))
+            self.assertTrue(task.allows_path("src/data/trivia.ts"))
+            self.assertFalse(task.allows_path("src/lib/db.ts"))
+
+    def test_task_headings_are_matched_exactly_not_by_substring(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            path = Path(directory) / "TASK.md"
+            path.write_text(
+                "# TASK\n\n"
+                "## 目标\n实现横幅。\n\n"
+                "## 允许改动以外的禁区\n- `src/anything.py`\n\n"
+                "## 禁区\n禁止 push。\n\n"
+                "## 接口\n保持函数签名。\n\n"
+                "## DoD\n测试通过。\n\n"
+                "## 验证命令\n- `npm test`\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(InvalidTask, "missing required sections"):
+                parse_task(path)
+
 
 class GitHubClientTests(unittest.TestCase):
     def test_token_is_scoped_to_gh_subprocess(self):
